@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monaco Playground Sandbox</title>
+  </head>
+  <body>
+    <div class="layout">
+      <header class="toolbar">
+        <div class="title">
+          <h1>Monaco JS Playground</h1>
+          <p>Run JavaScript in an isolated iframe with npm package imports.</p>
+        </div>
+        <div class="controls">
+          <label for="packages">Packages (comma-separated)</label>
+          <input
+            id="packages"
+            name="packages"
+            type="text"
+            value="dayjs,lodash-es"
+            placeholder="dayjs,lodash-es,@scope/pkg@1.2.3"
+          />
+          <div class="buttons">
+            <button id="run-btn" type="button">Run</button>
+            <button id="reset-btn" type="button">Reset</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="panes">
+        <section class="pane">
+          <h2>Editor</h2>
+          <div id="editor"></div>
+        </section>
+
+        <section class="pane">
+          <h2>Preview (sandboxed iframe)</h2>
+          <iframe
+            id="preview"
+            title="Playground output"
+            sandbox="allow-scripts"
+          ></iframe>
+        </section>
+      </main>
+
+      <section class="console-section">
+        <h2>Console</h2>
+        <pre id="console-output"></pre>
+      </section>
+    </div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
