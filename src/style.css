@@ -26,10 +26,8 @@ body {
   border: 1px solid #25345f;
   border-radius: 10px;
   padding: 14px;
-  display: flex;
-  justify-content: space-between;
-  gap: 18px;
-  flex-wrap: wrap;
+  display: grid;
+  gap: 16px;
 }
 
 .title h1 {
@@ -43,20 +41,72 @@ body {
   font-size: 0.95rem;
 }
 
-.controls {
+.controls-grid {
   display: grid;
-  align-content: start;
-  gap: 8px;
-  min-width: min(100%, 520px);
-  flex: 1;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
-.controls label {
+.control-card {
+  border: 1px solid #25345f;
+  border-radius: 8px;
+  background: #0d1730;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.control-card h2 {
+  margin: 0;
+  font-size: 0.96rem;
+  color: #c4d2f0;
+}
+
+.subtle {
+  margin: 0;
+  color: #8ea3d2;
+  font-size: 0.82rem;
+}
+
+.subtle code {
+  background: #0a142b;
+  border: 1px solid #25345f;
+  border-radius: 5px;
+  padding: 2px 6px;
+  color: #d7e4ff;
+}
+
+.status-line {
+  margin: 2px 0 0;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid #25345f;
+  background: #0a142b;
+  color: #b8c9ef;
+  font-size: 0.88rem;
+}
+
+.status-line[data-state="ok"] {
+  border-color: #20613f;
+  color: #8cf0ba;
+}
+
+.status-line[data-state="warn"] {
+  border-color: #69510f;
+  color: #f8d681;
+}
+
+.status-line[data-state="error"] {
+  border-color: #7d2a2a;
+  color: #ffb0b0;
+}
+
+.control-card label {
   font-size: 0.85rem;
   color: #a8b8de;
 }
 
-.controls input {
+.control-card input {
   width: 100%;
   border: 1px solid #334776;
   background: #0a142b;
@@ -80,6 +130,11 @@ body {
   padding: 9px 14px;
   font-weight: 600;
   cursor: pointer;
+}
+
+.buttons button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .buttons button:hover {

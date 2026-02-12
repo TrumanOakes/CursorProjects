@@ -1,10 +1,12 @@
-# Monaco JavaScript Sandbox (Embeddable Website Playground)
+# Monaco JS Sandbox + Audiotool Bridge
 
-This project is a **clear, minimal example** of how to build a JavaScript playground with:
+This project is a minimal, readable example of an embeddable playground with:
 
-- **Monaco Editor** (the code editor),
-- a **sandboxed iframe** (safe execution),
-- and **npm package imports** using `esm.sh` + import maps.
+- **Monaco Editor** for user code,
+- sandboxed iframe execution (`sandbox="allow-scripts"`),
+- npm package imports via `esm.sh`,
+- and a **safe parent-page bridge** that applies whitelisted operations to an
+  Audiotool project using `@audiotool/nexus`.
 
 ---
 
@@ -15,112 +17,107 @@ npm install
 npm run dev
 ```
 
-Then open the local URL shown in your terminal (usually `http://localhost:5173`).
+Open: `http://127.0.0.1:5173/`
+
+> The Vite dev server is intentionally configured to use `127.0.0.1` (not
+> `localhost`) because Audiotool OAuth redirect validation requires this.
 
 ---
 
-## 2) What this example includes
+## 2) Audiotool application setup
 
-- Left pane: Monaco editor
-- Right pane: sandboxed preview iframe (`sandbox="allow-scripts"`)
-- Top controls:
-  - package input (`dayjs,lodash-es` by default)
-  - **Run** button
-  - **Reset** button
-- Bottom pane: console output (logs + runtime errors)
+This repo is preconfigured with your client ID:
+
+`379f8d67-b211-43b2-8a9d-9553aa8aad32`
+
+Register/update your app on
+`https://developer.audiotool.com/applications` with:
+
+- Redirect URI (dev): `http://127.0.0.1:5173/`
+- Scope: `project:write`
+
+When you deploy, add your deployed URL as another redirect URI and make sure it
+matches exactly (protocol, path, trailing slash).
 
 ---
 
-## 3) Project structure
+## 3) What the app does
+
+- Lets user login/logout with Audiotool (`getLoginStatus`)
+- Creates `AudiotoolClient` when logged in
+- Connects to one project via `createSyncedDocument({ project })`
+- Starts sync with `document.start()`
+- Applies whitelisted operations from sandbox messages inside
+  `document.modify(...)`
+- Stops sync on disconnect/project switch/unload with `document.stop()`
+
+---
+
+## 4) Secure execution model
+
+### Trusted host (parent page)
+
+- Handles auth/client/document lifecycle
+- Holds credentials/token access
+- Validates and applies operations
+
+### Untrusted sandbox (iframe code)
+
+- Runs user JavaScript
+- Can only call `window.audiotool.apply(payload)` which sends a message to host
+- Never gets direct access to auth status, token, or Nexus client instances
+
+---
+
+## 5) Operation payload format
+
+In editor code, call:
+
+```js
+await window.audiotool.apply({
+  // optional: if omitted, currently connected project is used
+  // project: "https://beta.audiotool.com/studio?project=<id>",
+  ops: [
+    { op: "ensureEntity", entityType: "tonematrix", alias: "tm" },
+    { op: "updateField", entityAlias: "tm", field: "positionX", value: 900 },
+    { op: "updateField", entityAlias: "tm", field: "positionY", value: 600 }
+  ]
+});
+```
+
+Supported ops in this starter:
+
+- `ensureEntity` (find one by type, create if missing)
+- `createEntity`
+- `updateField`
+- `removeEntity`
+
+---
+
+## 6) Keyboard shortcut
+
+- Run iframe code: `Ctrl+Enter` (or `Cmd+Enter`)
+
+---
+
+## 7) Project structure
 
 ```text
 .
-├── index.html         # Page layout
+├── index.html
+├── vite.config.js
 ├── src/
-│   ├── main.js        # Monaco + sandbox runtime
-│   └── style.css      # Page styling
+│   ├── main.js
+│   └── style.css
 └── package.json
 ```
 
 ---
 
-## 4) How the sandbox works
+## 8) Production hardening suggestions
 
-### Step A: Read editor code + package list
-
-`main.js` collects:
-
-1. the current Monaco code,
-2. and package names from the input (comma-separated).
-
-Examples:
-
-- `dayjs`
-- `lodash-es`
-- `@scope/pkg@1.2.3`
-
-### Step B: Build an import map
-
-For each package, the app creates import map entries pointing to `https://esm.sh/<package>`.
-
-Example:
-
-```json
-{
-  "imports": {
-    "dayjs": "https://esm.sh/dayjs",
-    "dayjs/": "https://esm.sh/dayjs/"
-  }
-}
-```
-
-### Step C: Create iframe `srcdoc`
-
-The app builds a full HTML document string and sets `iframe.srcdoc`.
-
-That document includes:
-
-- a small `#app` mount element,
-- console/error forwarding with `postMessage`,
-- the generated import map,
-- the user code as `<script type="module">`.
-
-### Step D: Keep execution isolated
-
-The preview iframe uses:
-
-```html
-sandbox="allow-scripts"
-```
-
-This prevents user code from running in the host page context.
-
----
-
-## 5) Keyboard shortcut
-
-- **Run code:** `Ctrl+Enter` (or `Cmd+Enter` on macOS)
-
----
-
-## 6) How to embed this in a website
-
-You can reuse the same approach inside any docs/developer portal:
-
-1. Move the editor + preview block into a component.
-2. Pass initial code and package list as props/config.
-3. Keep code execution in a sandboxed iframe.
-4. Optionally persist snippets and share links from your backend.
-
----
-
-## 7) Notes for production hardening
-
-For a production public playground, add:
-
-- package allowlist/denylist,
-- stricter iframe policies/CSP,
-- request limits or snippet size limits,
-- telemetry and error reporting.
-
-This starter intentionally stays small and easy to understand first.
+- Restrict allowed operation/entity types more tightly
+- Add strict request quotas/rate limits in UI layer
+- Add CSP for parent page + iframe srcdoc strategy
+- Add richer error UX for transaction validation failures
+- Add project picker via `client.api.projectService.listProjects(...)`
