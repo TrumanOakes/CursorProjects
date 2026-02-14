@@ -185,24 +185,43 @@ function getRedirectUrl() {
   return url.toString();
 }
 
+function extractProjectUuid(projectValue) {
+  const uuidRegex =
+    /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+  const directMatch = projectValue.match(uuidRegex);
+  if (directMatch) {
+    return directMatch[0];
+  }
+
+  try {
+    const parsed = new URL(projectValue);
+    const fromQuery = parsed.searchParams.get("project");
+    if (!fromQuery) {
+      return "";
+    }
+    const queryMatch = fromQuery.match(uuidRegex);
+    return queryMatch ? queryMatch[0] : fromQuery;
+  } catch {
+    return "";
+  }
+}
+
 function resolveProjectStudioUrl(projectValue) {
   const trimmed = projectValue.trim();
   if (!trimmed) {
     return "";
   }
 
-  const uuidRegex =
-    /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
-  const uuidMatch = trimmed.match(uuidRegex);
-  if (uuidMatch) {
-    return `https://beta.audiotool.com/studio?project=${uuidMatch[0]}`;
+  const projectUuid = extractProjectUuid(trimmed);
+  if (projectUuid) {
+    return `https://new.audiotool.com/studio?project=${projectUuid}`;
   }
 
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
     return trimmed;
   }
 
-  return `https://beta.audiotool.com/studio?project=${encodeURIComponent(trimmed)}`;
+  return `https://new.audiotool.com/studio?project=${encodeURIComponent(trimmed)}`;
 }
 
 function setProjectPreview(studioUrl, note = "") {
@@ -305,7 +324,10 @@ async function connectProject(project) {
     throw new Error("Project URL or UUID is required.");
   }
 
-  const studioUrl = resolveProjectStudioUrl(project);
+  const rawProject = project.trim();
+  const projectUuid = extractProjectUuid(rawProject);
+  const projectReference = projectUuid || rawProject;
+  const studioUrl = resolveProjectStudioUrl(rawProject);
 
   isConnectingProject = true;
   updateControls();
@@ -314,7 +336,7 @@ async function connectProject(project) {
   try {
     const client = await ensureClient();
 
-    if (activeDocument && activeProject === project) {
+    if (activeDocument && activeProject === projectReference) {
       setAudiotoolStatus("Project already connected.", "ok");
       return;
     }
@@ -323,22 +345,31 @@ async function connectProject(project) {
       await stopActiveDocument("Switching to another project...");
     }
 
-    const document = await client.createSyncedDocument({ project });
+    const document = await client.createSyncedDocument({
+      project: projectReference,
+    });
     await document.start();
 
     activeDocument = document;
-    activeProject = project;
+    activeProject = projectReference;
     activeProjectStudioUrl = studioUrl;
     setProjectPreview(
       studioUrl,
       "Project preview could not be loaded in this frame. Open it in a new tab.",
     );
-    projectInput.value = project;
-    setAudiotoolStatus(`Connected to project: ${project}`, "ok");
-    appendConsoleLine("system", `Connected Audiotool project: ${project}`);
+    projectInput.value = studioUrl;
+    setAudiotoolStatus(`Connected to project: ${projectReference}`, "ok");
+    appendConsoleLine(
+      "system",
+      `Connected Audiotool project: ${projectReference}`,
+    );
     appendConsoleLine(
       "system",
       "Project preview updated. If the frame is blocked by browser policy, use Open Project Tab.",
+    );
+    appendConsoleLine(
+      "system",
+      "If you see a login error in the embedded preview, allow third-party cookies for audiotool.com or use Open Project Tab.",
     );
   } finally {
     isConnectingProject = false;

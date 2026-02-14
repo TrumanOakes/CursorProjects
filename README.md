@@ -57,6 +57,13 @@ matches exactly (protocol, path, trailing slash).
 If your browser or Audiotool headers block embedding, use **Open Project Tab**
 to open the same connected project URL in a full tab.
 
+If the embedded preview shows a login/session token error, this is usually due
+third-party cookie restrictions in iframe context. In that case:
+
+1. allow third-party cookies for `audiotool.com`,
+2. reconnect the project,
+3. or use **Open Project Tab**.
+
 ---
 
 ## 4) Secure execution model
