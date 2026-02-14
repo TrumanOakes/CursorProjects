@@ -65,6 +65,9 @@ third-party cookie restrictions in iframe context. In that case:
 3. authenticate once in **Open Project Tab**,
 4. then use **Reload Preview**.
 
+Google-based sign-in is especially likely to fail in embedded iframe contexts.
+Top-level tab authentication is the expected fallback.
+
 ---
 
 ## 4) Secure execution model

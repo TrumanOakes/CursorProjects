@@ -417,6 +417,10 @@ async function connectProject(project) {
       "system",
       "If you see a login error in the embedded preview, allow third-party cookies for audiotool.com or use Open Project Tab.",
     );
+    appendConsoleLine(
+      "system",
+      "Google sign-in can fail inside iframes. Authenticate in a full tab, then reload preview.",
+    );
   } finally {
     isConnectingProject = false;
     updateControls();
@@ -861,7 +865,7 @@ openProjectButton.addEventListener("click", () => {
     return;
   }
 
-  window.open(activeProjectStudioUrl, "_blank", "noopener,noreferrer");
+  window.open(activeProjectStudioUrl, "_blank");
 });
 
 reloadPreviewButton.addEventListener("click", () => {
