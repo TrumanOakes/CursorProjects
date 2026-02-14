@@ -213,8 +213,12 @@ function buildStudioUrl(origin, projectId) {
 function normalizeAudiotoolOrigin(candidateOrigin) {
   try {
     const parsed = new URL(candidateOrigin);
-    if (/audiotool\.com$/i.test(parsed.hostname)) {
+    if (parsed.hostname.toLowerCase() === "beta.audiotool.com") {
       return parsed.origin;
+    }
+
+    if (/audiotool\.com$/i.test(parsed.hostname)) {
+      return "https://beta.audiotool.com";
     }
   } catch {
     // Ignore invalid origin.
