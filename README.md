@@ -68,6 +68,12 @@ third-party cookie restrictions in iframe context. In that case:
 Google-based sign-in is especially likely to fail in embedded iframe contexts.
 Top-level tab authentication is the expected fallback.
 
+Important: when running on `127.0.0.1` (or any non-`audiotool.com` host),
+embedded Studio auth is cross-site and will not reliably work because the
+accounts flow relies on same-site cookie behavior. Local development should use
+**Open Project Tab**. Embedded preview is intended for deployment under an
+`*.audiotool.com` site context.
+
 ---
 
 ## 4) Secure execution model

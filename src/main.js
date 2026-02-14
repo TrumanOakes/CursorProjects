@@ -18,6 +18,9 @@ self.MonacoEnvironment = {
 const defaultPackages = "dayjs,lodash-es";
 const audiotoolClientId = "379f8d67-b211-43b2-8a9d-9553aa8aad32";
 const audiotoolScope = "project:write";
+const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
+  window.location.hostname,
+);
 const defaultSource = `import dayjs from "dayjs";
 import { startCase } from "lodash-es";
 
@@ -270,6 +273,47 @@ function resolveProjectConnection(projectValue) {
 }
 
 function setProjectPreview(studioUrl, note = "") {
+  if (!canEmbedAudiotoolStudio) {
+    projectPreview.src = "about:blank";
+    projectPreview.srcdoc = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        background: #0a142b;
+        color: #d4e0ff;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        text-align: center;
+        padding: 24px;
+      }
+      p {
+        max-width: 620px;
+        line-height: 1.5;
+      }
+      code {
+        background: #08122a;
+        border: 1px solid #25345f;
+        border-radius: 6px;
+        padding: 2px 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <p>
+      Embedded Audiotool Studio is disabled on <code>${window.location.hostname}</code>.
+      Local dev is cross-site relative to <code>audiotool.com</code>, so login flow cookies are not valid in iframe context.
+      Use <strong>Open Project Tab</strong> for now, then deploy under an <code>*.audiotool.com</code> host to enable embedded preview.
+    </p>
+  </body>
+</html>`;
+    return;
+  }
+
   if (!studioUrl) {
     projectPreview.src = "about:blank";
     projectPreview.srcdoc = `<!doctype html>
@@ -313,7 +357,7 @@ function updateControls() {
   connectButton.disabled = !loggedIn || isConnectingProject;
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
-  reloadPreviewButton.disabled = !activeProjectStudioUrl;
+  reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
 }
 
 function queueAudiotoolTask(task) {
@@ -421,6 +465,12 @@ async function connectProject(project) {
       "system",
       "Google sign-in can fail inside iframes. Authenticate in a full tab, then reload preview.",
     );
+    if (!canEmbedAudiotoolStudio) {
+      appendConsoleLine(
+        "system",
+        "Embedded preview is disabled on local/non-audiotool hosts. Open Project Tab is the supported local workflow.",
+      );
+    }
   } finally {
     isConnectingProject = false;
     updateControls();
@@ -906,6 +956,12 @@ async function initializeAudiotoolAuth() {
       );
       await ensureClient();
       appendConsoleLine("system", "Audiotool client initialized.");
+      if (!canEmbedAudiotoolStudio) {
+        setAudiotoolStatus(
+          "Logged in. Embedded preview is disabled on this host; use Open Project Tab for Studio.",
+          "warn",
+        );
+      }
     } else {
       setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
     }
