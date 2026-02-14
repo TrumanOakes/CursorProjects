@@ -50,6 +50,7 @@ const authButton = document.getElementById("auth-btn");
 const connectButton = document.getElementById("connect-btn");
 const disconnectButton = document.getElementById("disconnect-btn");
 const openProjectButton = document.getElementById("open-project-btn");
+const reloadPreviewButton = document.getElementById("reload-preview-btn");
 const audiotoolStatusElement = document.getElementById("audiotool-status");
 const redirectUrlElement = document.getElementById("redirect-url");
 const projectPreview = document.getElementById("project-preview");
@@ -312,6 +313,7 @@ function updateControls() {
   connectButton.disabled = !loggedIn || isConnectingProject;
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
+  reloadPreviewButton.disabled = !activeProjectStudioUrl;
 }
 
 function queueAudiotoolTask(task) {
@@ -860,6 +862,21 @@ openProjectButton.addEventListener("click", () => {
   }
 
   window.open(activeProjectStudioUrl, "_blank", "noopener,noreferrer");
+});
+
+reloadPreviewButton.addEventListener("click", () => {
+  if (!activeProjectStudioUrl) {
+    return;
+  }
+
+  setProjectPreview(
+    activeProjectStudioUrl,
+    "Project preview could not be loaded in this frame. Open it in a new tab.",
+  );
+  appendConsoleLine(
+    "system",
+    "Preview reloaded. If login still fails inside iframe, continue in Open Project Tab.",
+  );
 });
 
 async function initializeAudiotoolAuth() {

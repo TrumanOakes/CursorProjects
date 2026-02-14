@@ -62,7 +62,8 @@ third-party cookie restrictions in iframe context. In that case:
 
 1. allow third-party cookies for `audiotool.com`,
 2. reconnect the project,
-3. or use **Open Project Tab**.
+3. authenticate once in **Open Project Tab**,
+4. then use **Reload Preview**.
 
 ---
 

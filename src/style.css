@@ -161,6 +161,15 @@ body {
   color: #c4d2f0;
 }
 
+.preview-hint {
+  margin: 0;
+}
+
+.preview-buttons {
+  margin-top: -2px;
+  margin-bottom: 2px;
+}
+
 #editor {
   flex: 1;
   min-height: 560px;
