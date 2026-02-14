@@ -15,9 +15,43 @@
             into an Audiotool project.
           </p>
         </div>
+        <section class="control-card">
+          <h2>Audiotool connection</h2>
+          <p class="subtle">
+            Client ID:
+            <code>379f8d67-b211-43b2-8a9d-9553aa8aad32</code>
+          </p>
+          <p class="subtle">
+            Redirect URL:
+            <code id="redirect-url"></code>
+          </p>
 
-        <div class="controls-grid">
-          <section class="control-card">
+          <label for="project-input">Project URL or UUID</label>
+          <input
+            id="project-input"
+            name="project-input"
+            type="text"
+            placeholder="https://beta.audiotool.com/studio?project=<project-id>"
+          />
+          <div class="buttons">
+            <button id="auth-btn" type="button">Login</button>
+            <button id="connect-btn" type="button" disabled>
+              Connect Project
+            </button>
+            <button id="disconnect-btn" type="button" disabled>Disconnect</button>
+            <button id="open-project-btn" type="button" disabled>
+              Open Project Tab
+            </button>
+          </div>
+          <p id="audiotool-status" class="status-line">Auth not initialized.</p>
+        </section>
+      </header>
+
+      <main class="panes">
+        <section class="pane editor-pane">
+          <h2>Editor</h2>
+          <div id="editor"></div>
+          <section class="control-card controls-under-editor">
             <h2>Playground controls</h2>
             <label for="packages">Packages (comma-separated)</label>
             <input
@@ -32,59 +66,23 @@
               <button id="reset-btn" type="button">Reset</button>
             </div>
           </section>
-
-          <section class="control-card">
-            <h2>Audiotool connection</h2>
-            <p class="subtle">
-              Client ID:
-              <code>379f8d67-b211-43b2-8a9d-9553aa8aad32</code>
-            </p>
-            <p class="subtle">
-              Redirect URL:
-              <code id="redirect-url"></code>
-            </p>
-
-            <label for="project-input">Project URL or UUID</label>
-            <input
-              id="project-input"
-              name="project-input"
-              type="text"
-              placeholder="https://beta.audiotool.com/studio?project=<project-id>"
-            />
-            <div class="buttons">
-              <button id="auth-btn" type="button">Login</button>
-              <button id="connect-btn" type="button" disabled>
-                Connect Project
-              </button>
-              <button id="disconnect-btn" type="button" disabled>
-                Disconnect
-              </button>
-            </div>
-            <p id="audiotool-status" class="status-line">Auth not initialized.</p>
-          </section>
-        </div>
-      </header>
-
-      <main class="panes">
-        <section class="pane">
-          <h2>Editor</h2>
-          <div id="editor"></div>
         </section>
 
-        <section class="pane">
-          <h2>Preview (sandboxed iframe)</h2>
+        <section class="pane preview-pane">
+          <h2>Project preview</h2>
           <iframe
-            id="preview"
-            title="Playground output"
-            sandbox="allow-scripts"
+            id="project-preview"
+            title="Audiotool project preview"
           ></iframe>
         </section>
       </main>
 
-      <section class="console-section">
-        <h2>Console</h2>
+      <details class="console-section">
+        <summary>Console</summary>
         <pre id="console-output"></pre>
-      </section>
+      </details>
+
+      <iframe id="runtime-frame" sandbox="allow-scripts" hidden></iframe>
     </div>
 
     <script type="module" src="/src/main.js"></script>

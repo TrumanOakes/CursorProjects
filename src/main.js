@@ -21,31 +21,24 @@ const audiotoolScope = "project:write";
 const defaultSource = `import dayjs from "dayjs";
 import { startCase } from "lodash-es";
 
-const app = document.getElementById("app");
+console.log(startCase("monaco sandbox is running"));
+console.log("Current time:", dayjs().format("YYYY-MM-DD HH:mm:ss"));
 
-app.innerHTML = \`
-  <h1>\${startCase("monaco sandbox is running")}</h1>
-  <p>Current time: \${dayjs().format("YYYY-MM-DD HH:mm:ss")}</p>
-  <button id="sync-audiotool">Apply demo change to Audiotool</button>
-\`;
-
-document.getElementById("sync-audiotool").addEventListener("click", async () => {
-  try {
-    await window.audiotool.apply({
-      ops: [
-        { op: "ensureEntity", entityType: "tonematrix", alias: "tm" },
-        { op: "updateField", entityAlias: "tm", field: "positionX", value: 900 },
-        { op: "updateField", entityAlias: "tm", field: "positionY", value: 600 },
-      ],
-    });
-
-    console.log("Audiotool ops were synced.");
-  } catch (error) {
-    console.error("Audiotool apply failed:", error);
-  }
-});
-
-console.log("Sandbox loaded successfully. Click the button to sync demo ops.");
+try {
+  await window.audiotool.apply({
+    ops: [
+      { op: "ensureEntity", entityType: "tonematrix", alias: "tm" },
+      { op: "updateField", entityAlias: "tm", field: "positionX", value: 900 },
+      { op: "updateField", entityAlias: "tm", field: "positionY", value: 600 },
+    ],
+  });
+  console.log("Audiotool ops were synced to the connected project.");
+} catch (error) {
+  console.warn(
+    "Connect a project first, then run again to sync operations.",
+    error,
+  );
+}
 `;
 
 const editorElement = document.getElementById("editor");
@@ -56,9 +49,11 @@ const projectInput = document.getElementById("project-input");
 const authButton = document.getElementById("auth-btn");
 const connectButton = document.getElementById("connect-btn");
 const disconnectButton = document.getElementById("disconnect-btn");
+const openProjectButton = document.getElementById("open-project-btn");
 const audiotoolStatusElement = document.getElementById("audiotool-status");
 const redirectUrlElement = document.getElementById("redirect-url");
-const preview = document.getElementById("preview");
+const projectPreview = document.getElementById("project-preview");
+const runtimeFrame = document.getElementById("runtime-frame");
 const consoleOutput = document.getElementById("console-output");
 
 packageInput.value = defaultPackages;
@@ -67,6 +62,7 @@ let loginStatus = null;
 let audiotoolClient = null;
 let activeDocument = null;
 let activeProject = "";
+let activeProjectStudioUrl = "";
 let isConnectingProject = false;
 let isInitializingAuth = false;
 let audiotoolQueue = Promise.resolve();
@@ -189,6 +185,62 @@ function getRedirectUrl() {
   return url.toString();
 }
 
+function resolveProjectStudioUrl(projectValue) {
+  const trimmed = projectValue.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const uuidRegex =
+    /[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+  const uuidMatch = trimmed.match(uuidRegex);
+  if (uuidMatch) {
+    return `https://beta.audiotool.com/studio?project=${uuidMatch[0]}`;
+  }
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    return trimmed;
+  }
+
+  return `https://beta.audiotool.com/studio?project=${encodeURIComponent(trimmed)}`;
+}
+
+function setProjectPreview(studioUrl, note = "") {
+  if (!studioUrl) {
+    projectPreview.src = "about:blank";
+    projectPreview.srcdoc = `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        background: #0a142b;
+        color: #d4e0ff;
+        font-family: Inter, system-ui, -apple-system, sans-serif;
+        text-align: center;
+        padding: 24px;
+      }
+      p {
+        max-width: 520px;
+        line-height: 1.5;
+      }
+    </style>
+  </head>
+  <body>
+    <p>${note || "Log in and connect a project to display Audiotool here."}</p>
+  </body>
+</html>`;
+    return;
+  }
+
+  projectPreview.removeAttribute("srcdoc");
+  projectPreview.src = studioUrl;
+}
+
 function updateControls() {
   const loggedIn = Boolean(loginStatus && loginStatus.loggedIn);
   authButton.disabled = isInitializingAuth;
@@ -196,6 +248,7 @@ function updateControls() {
 
   connectButton.disabled = !loggedIn || isConnectingProject;
   disconnectButton.disabled = !activeDocument || isConnectingProject;
+  openProjectButton.disabled = !activeProjectStudioUrl;
 }
 
 function queueAudiotoolTask(task) {
@@ -213,6 +266,8 @@ async function stopActiveDocument(note = "Disconnected from project.") {
   activeDocument = null;
   const previousProject = activeProject;
   activeProject = "";
+  activeProjectStudioUrl = "";
+  setProjectPreview("", "Project preview is disconnected.");
   updateControls();
 
   try {
@@ -250,6 +305,8 @@ async function connectProject(project) {
     throw new Error("Project URL or UUID is required.");
   }
 
+  const studioUrl = resolveProjectStudioUrl(project);
+
   isConnectingProject = true;
   updateControls();
   setAudiotoolStatus("Connecting to Audiotool project...", "warn");
@@ -271,9 +328,18 @@ async function connectProject(project) {
 
     activeDocument = document;
     activeProject = project;
+    activeProjectStudioUrl = studioUrl;
+    setProjectPreview(
+      studioUrl,
+      "Project preview could not be loaded in this frame. Open it in a new tab.",
+    );
     projectInput.value = project;
     setAudiotoolStatus(`Connected to project: ${project}`, "ok");
     appendConsoleLine("system", `Connected Audiotool project: ${project}`);
+    appendConsoleLine(
+      "system",
+      "Project preview updated. If the frame is blocked by browser policy, use Open Project Tab.",
+    );
   } finally {
     isConnectingProject = false;
     updateControls();
@@ -426,7 +492,7 @@ async function ensureRequestedProject(requestedProject) {
 }
 
 function postAudiotoolResult(requestId, response) {
-  const target = preview.contentWindow;
+  const target = runtimeFrame.contentWindow;
   if (!target) {
     return;
   }
@@ -615,7 +681,7 @@ function runCode() {
   const sourceCode = editor.getValue();
   const html = createPreviewDocument(sourceCode, importMap);
 
-  preview.srcdoc = html;
+  runtimeFrame.srcdoc = html;
 
   const packageLabel = packageList.length
     ? packageList
@@ -624,10 +690,14 @@ function runCode() {
     : "(none)";
 
   appendConsoleLine("system", `Running with packages: ${packageLabel}`);
+  appendConsoleLine(
+    "system",
+    "Script runtime is hidden; use project preview and console to inspect results.",
+  );
 }
 
 window.addEventListener("message", (event) => {
-  if (event.source !== preview.contentWindow) {
+  if (event.source !== runtimeFrame.contentWindow) {
     return;
   }
 
@@ -709,6 +779,14 @@ disconnectButton.addEventListener("click", () => {
   queueAudiotoolTask(() => stopActiveDocument("Disconnected from project."));
 });
 
+openProjectButton.addEventListener("click", () => {
+  if (!activeProjectStudioUrl) {
+    return;
+  }
+
+  window.open(activeProjectStudioUrl, "_blank", "noopener,noreferrer");
+});
+
 async function initializeAudiotoolAuth() {
   isInitializingAuth = true;
   updateControls();
@@ -747,6 +825,7 @@ async function initializeAudiotoolAuth() {
 
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runCode);
 
+setProjectPreview("", "Log in and connect a project to show the Audiotool workspace here.");
 runCode();
 initializeAudiotoolAuth();
 

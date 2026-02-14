@@ -46,10 +46,16 @@ matches exactly (protocol, path, trailing slash).
 - Lets user login/logout with Audiotool (`getLoginStatus`)
 - Creates `AudiotoolClient` when logged in
 - Connects to one project via `createSyncedDocument({ project })`
+- Displays the connected Audiotool Studio project in the large preview pane
 - Starts sync with `document.start()`
 - Applies whitelisted operations from sandbox messages inside
   `document.modify(...)`
 - Stops sync on disconnect/project switch/unload with `document.stop()`
+- Keeps the runtime iframe hidden (for safety) and shows logs in a collapsible
+  console panel
+
+If your browser or Audiotool headers block embedding, use **Open Project Tab**
+to open the same connected project URL in a full tab.
 
 ---
 
