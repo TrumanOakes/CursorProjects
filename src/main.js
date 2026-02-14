@@ -206,22 +206,62 @@ function extractProjectUuid(projectValue) {
   }
 }
 
-function resolveProjectStudioUrl(projectValue) {
+function buildStudioUrl(origin, projectId) {
+  return `${origin}/studio?project=${encodeURIComponent(projectId)}`;
+}
+
+function normalizeAudiotoolOrigin(candidateOrigin) {
+  try {
+    const parsed = new URL(candidateOrigin);
+    if (/audiotool\.com$/i.test(parsed.hostname)) {
+      return parsed.origin;
+    }
+  } catch {
+    // Ignore invalid origin.
+  }
+
+  return "https://beta.audiotool.com";
+}
+
+function resolveProjectConnection(projectValue) {
   const trimmed = projectValue.trim();
   if (!trimmed) {
-    return "";
+    return { projectReference: "", studioUrl: "" };
+  }
+
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    try {
+      const parsed = new URL(trimmed);
+      const projectId = extractProjectUuid(trimmed);
+      if (projectId) {
+        const origin = normalizeAudiotoolOrigin(parsed.origin);
+        return {
+          projectReference: projectId,
+          studioUrl: buildStudioUrl(origin, projectId),
+        };
+      }
+
+      return {
+        projectReference: trimmed,
+        studioUrl: trimmed,
+      };
+    } catch {
+      return { projectReference: trimmed, studioUrl: trimmed };
+    }
   }
 
   const projectUuid = extractProjectUuid(trimmed);
   if (projectUuid) {
-    return `https://new.audiotool.com/studio?project=${projectUuid}`;
+    return {
+      projectReference: projectUuid,
+      studioUrl: buildStudioUrl("https://beta.audiotool.com", projectUuid),
+    };
   }
 
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-    return trimmed;
-  }
-
-  return `https://new.audiotool.com/studio?project=${encodeURIComponent(trimmed)}`;
+  return {
+    projectReference: trimmed,
+    studioUrl: buildStudioUrl("https://beta.audiotool.com", trimmed),
+  };
 }
 
 function setProjectPreview(studioUrl, note = "") {
@@ -324,10 +364,10 @@ async function connectProject(project) {
     throw new Error("Project URL or UUID is required.");
   }
 
-  const rawProject = project.trim();
-  const projectUuid = extractProjectUuid(rawProject);
-  const projectReference = projectUuid || rawProject;
-  const studioUrl = resolveProjectStudioUrl(rawProject);
+  const { projectReference, studioUrl } = resolveProjectConnection(project);
+  if (!projectReference || !studioUrl) {
+    throw new Error("Could not determine a valid project reference.");
+  }
 
   isConnectingProject = true;
   updateControls();
