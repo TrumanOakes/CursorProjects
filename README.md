@@ -26,9 +26,12 @@ Register this redirect URI in your Audiotool application settings:
 
 `http://127.0.0.1:5173/`
 
-Use scope:
+Use scopes:
 
-`project:write`
+`project:write sample:write`
+
+If you previously logged in with only `project:write`, log out and log in again
+after updating scopes so the new token includes sample permissions.
 
 ## Workflow
 

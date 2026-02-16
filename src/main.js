@@ -2,7 +2,8 @@ import "./style.css";
 import { createAudiotoolClient, getLoginStatus } from "@audiotool/nexus";
 
 const audiotoolClientId = "7c3188d7-220f-4d34-92a6-608acc8ed4eb";
-const audiotoolScope = "project:write";
+const requiredAudiotoolScopes = ["project:write", "sample:write"];
+const audiotoolScope = requiredAudiotoolScopes.join(" ");
 const importedRegionNamePrefix = "[Video Import]";
 const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
   window.location.hostname,
@@ -50,6 +51,7 @@ let selectedVideoFile = null;
 let selectedAudioBuffer = null;
 let selectedVideoObjectUrl = "";
 let importMarkerSeconds = 0;
+let missingRequiredScopes = [];
 
 let audiotoolQueue = Promise.resolve();
 
@@ -61,7 +63,11 @@ function appendConsoleLine(level, message) {
 
 function toDisplayString(value) {
   if (value instanceof Error) {
-    return value.stack || value.message;
+    const message = typeof value.message === "string" ? value.message.trim() : "";
+    if (message) {
+      return message;
+    }
+    return value.stack || value.name || "Unknown error";
   }
 
   if (typeof value === "string") {
@@ -72,6 +78,112 @@ function toDisplayString(value) {
     return JSON.stringify(value, null, 2);
   } catch {
     return String(value);
+  }
+}
+
+function formatApiErrorDetail(errorLike) {
+  if (errorLike instanceof Error) {
+    const parts = [];
+    if (errorLike.message) {
+      parts.push(errorLike.message);
+    }
+    if (typeof errorLike.code !== "undefined") {
+      parts.push(`code=${String(errorLike.code)}`);
+    }
+    if (typeof errorLike.rawMessage === "string" && errorLike.rawMessage) {
+      parts.push(`raw=${errorLike.rawMessage}`);
+    }
+
+    if (parts.length) {
+      return parts.join(" | ");
+    }
+  }
+
+  return toDisplayString(errorLike);
+}
+
+function isLikelyScopeErrorText(detail) {
+  const text = String(detail || "").toLowerCase();
+  return (
+    text.includes("scope") ||
+    text.includes("permission") ||
+    text.includes("forbidden") ||
+    text.includes("unauth") ||
+    text.includes("denied") ||
+    text.includes("403")
+  );
+}
+
+function decodeBase64Url(input) {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded =
+    normalized.length % 4 === 0
+      ? normalized
+      : `${normalized}${"=".repeat(4 - (normalized.length % 4))}`;
+  return atob(padded);
+}
+
+function extractGrantedScopesFromToken(token) {
+  if (typeof token !== "string") {
+    return [];
+  }
+
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return [];
+  }
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(parts[1]));
+    const rawScope =
+      typeof payload.scope === "string"
+        ? payload.scope
+        : typeof payload.scp === "string"
+          ? payload.scp
+          : Array.isArray(payload.scope)
+            ? payload.scope.join(" ")
+            : "";
+    if (!rawScope) {
+      return [];
+    }
+    return rawScope.split(/\s+/).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function refreshMissingRequiredScopes() {
+  missingRequiredScopes = [];
+  if (!loginStatus || !loginStatus.loggedIn) {
+    return;
+  }
+
+  const tokenResult = await loginStatus.getToken();
+  if (tokenResult instanceof Error) {
+    appendConsoleLine(
+      "warn",
+      `Could not inspect granted scopes from token: ${formatApiErrorDetail(tokenResult)}`,
+    );
+    return;
+  }
+
+  const grantedScopes = extractGrantedScopesFromToken(tokenResult);
+  if (!grantedScopes.length) {
+    appendConsoleLine(
+      "system",
+      "Could not decode OAuth scopes from token payload; continuing without scope pre-check.",
+    );
+    return;
+  }
+
+  missingRequiredScopes = requiredAudiotoolScopes.filter(
+    (scope) => !grantedScopes.includes(scope),
+  );
+  if (missingRequiredScopes.length) {
+    appendConsoleLine(
+      "warn",
+      `Missing required scopes: ${missingRequiredScopes.join(", ")}. Logout and login again after updating app scopes if needed.`,
+    );
   }
 }
 
@@ -466,8 +578,15 @@ function updateControls() {
     !selectedAudioBuffer ||
     !selectedVideoFile ||
     !activeDocument ||
+    Boolean(missingRequiredScopes.length) ||
     isConnectingProject ||
     isImportingAudio;
+
+  if (missingRequiredScopes.length) {
+    importAudioButton.title = `Missing OAuth scopes: ${missingRequiredScopes.join(", ")}`;
+  } else {
+    importAudioButton.removeAttribute("title");
+  }
 }
 
 async function ensureClient() {
@@ -586,18 +705,31 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
   const wavBlob = audioBufferToWavBlob(audioBuffer);
   const sampleDisplayName = sanitizeDisplayName(fileName);
 
-  const createResult = await client.api.sampleService.createSample({
-    sample: {
-      displayName: sampleDisplayName,
-      description: `Imported from local video file: ${fileName}`,
-      sampleType: 1,
-      usage: 3,
-      tags: ["video-import", "local-workflow"],
-    },
-  });
+  let createResult;
+  try {
+    createResult = await client.api.sampleService.createSample({
+      sample: {
+        displayName: sampleDisplayName,
+        description: `Imported from local video file: ${fileName}`,
+        sampleType: 1,
+        usage: 3,
+        tags: ["video-import", "local-workflow"],
+      },
+    });
+  } catch (error) {
+    const detail = formatApiErrorDetail(error);
+    const maybeScopeHint = isLikelyScopeErrorText(detail)
+      ? ` Required scopes include: ${requiredAudiotoolScopes.join(", ")}. If scopes changed, logout and login again.`
+      : "";
+    throw new Error(`CreateSample call threw: ${detail}.${maybeScopeHint}`);
+  }
 
   if (isErrorResult(createResult)) {
-    throw new Error(`CreateSample failed: ${createResult.message}`);
+    const detail = formatApiErrorDetail(createResult);
+    const maybeScopeHint = isLikelyScopeErrorText(detail)
+      ? ` Required scopes include: ${requiredAudiotoolScopes.join(", ")}. If scopes changed, logout and login again.`
+      : "";
+    throw new Error(`CreateSample failed: ${detail}.${maybeScopeHint}`);
   }
 
   const sampleName = createResult.sample?.name;
@@ -606,9 +738,12 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
     throw new Error("CreateSample did not return a valid upload endpoint.");
   }
 
-  const uploadHeaders = new Headers(uploadEndpoint.headers || {});
-  if (!uploadHeaders.has("Content-Type")) {
-    uploadHeaders.set("Content-Type", "audio/wav");
+  const uploadHeaders = new Headers();
+  for (const [headerName, headerValue] of Object.entries(uploadEndpoint.headers || {})) {
+    if (headerName.toLowerCase() === "host") {
+      continue;
+    }
+    uploadHeaders.set(headerName, headerValue);
   }
 
   const uploadResponse = await fetch(uploadEndpoint.uploadUrl, {
@@ -627,7 +762,7 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
     name: sampleName,
   });
   if (isErrorResult(finishedResult)) {
-    throw new Error(`UploadSampleFinished failed: ${finishedResult.message}`);
+    throw new Error(`UploadSampleFinished failed: ${formatApiErrorDetail(finishedResult)}`);
   }
 
   return {
@@ -669,9 +804,13 @@ async function waitForSampleReady(sampleName, opts = {}) {
     });
 
     if (isErrorResult(sampleResult)) {
-      lastDetail = sampleResult.message || toDisplayString(sampleResult);
+      lastDetail = formatApiErrorDetail(sampleResult);
       if (isLikelyPermissionError(sampleResult)) {
-        throw new Error(`GetSample failed: ${lastDetail}`);
+        appendConsoleLine(
+          "warn",
+          `Skipping sample readiness polling due permissions on getSample: ${lastDetail}`,
+        );
+        return null;
       }
       await sleep(pollMs);
       continue;
@@ -809,6 +948,12 @@ async function importSelectedVideoAudio() {
     throw new Error("Connect a project before importing audio.");
   }
 
+  if (missingRequiredScopes.length) {
+    throw new Error(
+      `Missing OAuth scopes: ${missingRequiredScopes.join(", ")}. Click Logout, then Login to grant updated permissions.`,
+    );
+  }
+
   const importPositionSeconds = clampVideoTime(importMarkerSeconds);
   const replacePreviousImports = replaceImportedToggle.checked;
 
@@ -819,7 +964,13 @@ async function importSelectedVideoAudio() {
   );
 
   setVideoStatus("Waiting for sample conversion to finish...", "warn");
-  await waitForSampleReady(uploadResult.sampleName);
+  const readySample = await waitForSampleReady(uploadResult.sampleName);
+  if (!readySample) {
+    appendConsoleLine(
+      "warn",
+      "Continuing without sample readiness polling result; project insertion will retry automatically.",
+    );
+  }
 
   setVideoStatus("Placing sample region into project timeline...", "warn");
   await placeSampleIntoProjectWithRetry({
@@ -1046,6 +1197,9 @@ videoFileInput.addEventListener("change", () => {
 
 importAudioButton.addEventListener("click", () => {
   queueAudiotoolTask(async () => {
+    await refreshMissingRequiredScopes();
+    updateControls();
+
     if (!selectedVideoFile || !selectedAudioBuffer) {
       setVideoStatus("Select a video file before importing audio.", "warn");
       return;
@@ -1090,6 +1244,7 @@ async function initializeAudiotoolAuth() {
   isInitializingAuth = true;
   updateControls();
   setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
+  appendConsoleLine("system", `Requested OAuth scope: ${audiotoolScope}`);
 
   const redirectUrl = getRedirectUrl();
   redirectUrlElement.textContent = redirectUrl;
@@ -1108,6 +1263,13 @@ async function initializeAudiotoolAuth() {
         "ok",
       );
       await ensureClient();
+      await refreshMissingRequiredScopes();
+      if (missingRequiredScopes.length) {
+        setAudiotoolStatus(
+          `Logged in, but token is missing required scopes (${missingRequiredScopes.join(", ")}). Click Logout then Login.`,
+          "warn",
+        );
+      }
       appendConsoleLine("system", "Audiotool client initialized.");
 
       if (!canEmbedAudiotoolStudio) {
@@ -1117,7 +1279,12 @@ async function initializeAudiotoolAuth() {
         );
       }
     } else {
-      setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
+      const errorText = loginStatus.error ? toDisplayString(loginStatus.error) : "";
+      if (errorText) {
+        setAudiotoolStatus(`Logged out: ${errorText}`, "error");
+      } else {
+        setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
+      }
     }
   } catch (error) {
     const detail = toDisplayString(error);
