@@ -46,13 +46,25 @@ matches exactly (protocol, path, trailing slash).
 - Lets user login/logout with Audiotool (`getLoginStatus`)
 - Creates `AudiotoolClient` when logged in
 - Connects to one project via `createSyncedDocument({ project })`
-- Displays the connected Audiotool Studio project in the large preview pane
+- Lets you select a **local video file** (not uploaded/hosted)
+- Decodes the video's audio track in-browser
+- Uploads only the decoded audio as a new Audiotool sample
+- Inserts that sample into the connected project timeline as an `audioRegion`
+- Keeps the local video playable side-by-side while you edit project audio
 - Starts sync with `document.start()`
 - Applies whitelisted operations from sandbox messages inside
   `document.modify(...)`
 - Stops sync on disconnect/project switch/unload with `document.stop()`
 - Keeps the runtime iframe hidden (for safety) and shows logs in a collapsible
   console panel
+
+### Workflow sequence
+
+1. Upload/select local video.
+2. Connect project.
+3. Click **Import Video Audio to Connected Project**.
+4. Open project tab and edit audio in Audiotool.
+5. Play local video side-by-side as your visual reference.
 
 If your browser or Audiotool headers block embedding, use **Open Project Tab**
 to open the same connected project URL in a full tab.
@@ -114,6 +126,15 @@ Supported ops in this starter:
 - `createEntity`
 - `updateField`
 - `removeEntity`
+
+The built-in import flow also uses Audiotool's sample APIs:
+
+- `sampleService.createSample`
+- signed `PUT` upload to returned `uploadEndpoint.uploadUrl`
+- `sampleService.uploadSampleFinished`
+
+Then it creates Nexus entities in the synced project (`sample`,
+`automationCollection`, `audioTrack` if needed, and `audioRegion`).
 
 ---
 

@@ -24,21 +24,22 @@ const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
 const defaultSource = `import dayjs from "dayjs";
 import { startCase } from "lodash-es";
 
-console.log(startCase("monaco sandbox is running"));
+console.log(startCase("video audio playground sandbox is running"));
 console.log("Current time:", dayjs().format("YYYY-MM-DD HH:mm:ss"));
+console.log(
+  "After importing a video's audio into your project, run this script to tweak the first audio region gain."
+);
 
 try {
   await window.audiotool.apply({
     ops: [
-      { op: "ensureEntity", entityType: "tonematrix", alias: "tm" },
-      { op: "updateField", entityAlias: "tm", field: "positionX", value: 900 },
-      { op: "updateField", entityAlias: "tm", field: "positionY", value: 600 },
+      { op: "updateField", entityType: "audioRegion", field: "gain", value: 0.9 },
     ],
   });
-  console.log("Audiotool ops were synced to the connected project.");
+  console.log("Applied audioRegion gain edit.");
 } catch (error) {
   console.warn(
-    "Connect a project first, then run again to sync operations.",
+    "Import a video's audio first, then run again to sync timeline edits.",
     error,
   );
 }
@@ -54,9 +55,13 @@ const connectButton = document.getElementById("connect-btn");
 const disconnectButton = document.getElementById("disconnect-btn");
 const openProjectButton = document.getElementById("open-project-btn");
 const reloadPreviewButton = document.getElementById("reload-preview-btn");
+const importAudioButton = document.getElementById("import-audio-btn");
 const audiotoolStatusElement = document.getElementById("audiotool-status");
 const redirectUrlElement = document.getElementById("redirect-url");
 const projectPreview = document.getElementById("project-preview");
+const localVideoPreview = document.getElementById("local-video-preview");
+const videoFileInput = document.getElementById("video-file-input");
+const videoStatusElement = document.getElementById("video-status");
 const runtimeFrame = document.getElementById("runtime-frame");
 const consoleOutput = document.getElementById("console-output");
 
@@ -69,7 +74,11 @@ let activeProject = "";
 let activeProjectStudioUrl = "";
 let isConnectingProject = false;
 let isInitializingAuth = false;
+let isImportingAudio = false;
 let audiotoolQueue = Promise.resolve();
+let selectedVideoFile = null;
+let selectedAudioBuffer = null;
+let selectedVideoObjectUrl = "";
 
 monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
 monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
@@ -170,6 +179,268 @@ function toDisplayString(value) {
 function setAudiotoolStatus(message, state = "warn") {
   audiotoolStatusElement.textContent = message;
   audiotoolStatusElement.dataset.state = state;
+}
+
+function setVideoStatus(message, state = "warn") {
+  videoStatusElement.textContent = message;
+  videoStatusElement.dataset.state = state;
+}
+
+function revokeSelectedVideoUrl() {
+  if (!selectedVideoObjectUrl) {
+    return;
+  }
+
+  URL.revokeObjectURL(selectedVideoObjectUrl);
+  selectedVideoObjectUrl = "";
+}
+
+async function decodeAudioTrack(file) {
+  const audioContext = new AudioContext();
+
+  try {
+    const fileData = await file.arrayBuffer();
+    const decoded = await audioContext.decodeAudioData(fileData);
+    return decoded;
+  } finally {
+    await audioContext.close();
+  }
+}
+
+function audioBufferToWavBlob(audioBuffer) {
+  const numChannels = audioBuffer.numberOfChannels;
+  const sampleRate = audioBuffer.sampleRate;
+  const format = 1;
+  const bitDepth = 16;
+  const samples = audioBuffer.length;
+  const blockAlign = (numChannels * bitDepth) / 8;
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = samples * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  function writeString(offset, value) {
+    for (let index = 0; index < value.length; index += 1) {
+      view.setUint8(offset + index, value.charCodeAt(index));
+    }
+  }
+
+  let offset = 0;
+  writeString(offset, "RIFF");
+  offset += 4;
+  view.setUint32(offset, 36 + dataSize, true);
+  offset += 4;
+  writeString(offset, "WAVE");
+  offset += 4;
+  writeString(offset, "fmt ");
+  offset += 4;
+  view.setUint32(offset, 16, true);
+  offset += 4;
+  view.setUint16(offset, format, true);
+  offset += 2;
+  view.setUint16(offset, numChannels, true);
+  offset += 2;
+  view.setUint32(offset, sampleRate, true);
+  offset += 4;
+  view.setUint32(offset, byteRate, true);
+  offset += 4;
+  view.setUint16(offset, blockAlign, true);
+  offset += 2;
+  view.setUint16(offset, bitDepth, true);
+  offset += 2;
+  writeString(offset, "data");
+  offset += 4;
+  view.setUint32(offset, dataSize, true);
+  offset += 4;
+
+  const channels = Array.from({ length: numChannels }, (_, index) =>
+    audioBuffer.getChannelData(index),
+  );
+
+  for (let sampleIndex = 0; sampleIndex < samples; sampleIndex += 1) {
+    for (let channelIndex = 0; channelIndex < numChannels; channelIndex += 1) {
+      const sample = Math.max(-1, Math.min(1, channels[channelIndex][sampleIndex]));
+      const pcm =
+        sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7fff);
+      view.setInt16(offset, pcm, true);
+      offset += 2;
+    }
+  }
+
+  return new Blob([buffer], { type: "audio/wav" });
+}
+
+function isErrorResult(result) {
+  return result instanceof Error;
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "00:00";
+  }
+
+  const wholeSeconds = Math.floor(seconds);
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainder = wholeSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function secondsToTicksAtBpm(seconds, bpm) {
+  const ticksPerBeat = 3840;
+  return Math.max(1, Math.round((seconds * bpm * ticksPerBeat) / 60));
+}
+
+function sanitizeDisplayName(name) {
+  const cleaned = name.replace(/\.[^/.]+$/, "").trim();
+  if (cleaned) {
+    return cleaned.slice(0, 60);
+  }
+  return "Imported Video Audio";
+}
+
+async function uploadAudioAsSample(fileName, audioBuffer) {
+  const client = await ensureClient();
+  const wavBlob = audioBufferToWavBlob(audioBuffer);
+  const sampleDisplayName = sanitizeDisplayName(fileName);
+
+  const createResult = await client.api.sampleService.createSample({
+    sample: {
+      displayName: sampleDisplayName,
+      description: `Imported from local video file: ${fileName}`,
+      sampleType: 1,
+      usage: 3,
+      tags: ["video-import", "local-workflow"],
+    },
+  });
+
+  if (isErrorResult(createResult)) {
+    throw new Error(`CreateSample failed: ${createResult.message}`);
+  }
+
+  const sampleName = createResult.sample?.name;
+  const uploadEndpoint = createResult.uploadEndpoint;
+  if (!sampleName || !uploadEndpoint?.uploadUrl) {
+    throw new Error("CreateSample did not return a valid upload endpoint.");
+  }
+
+  const uploadHeaders = new Headers(uploadEndpoint.headers || {});
+  if (!uploadHeaders.has("Content-Type")) {
+    uploadHeaders.set("Content-Type", "audio/wav");
+  }
+
+  const uploadResponse = await fetch(uploadEndpoint.uploadUrl, {
+    method: "PUT",
+    headers: uploadHeaders,
+    body: wavBlob,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `Sample upload failed with status ${uploadResponse.status} ${uploadResponse.statusText}.`,
+    );
+  }
+
+  const finishedResult = await client.api.sampleService.uploadSampleFinished({
+    name: sampleName,
+  });
+  if (isErrorResult(finishedResult)) {
+    throw new Error(`UploadSampleFinished failed: ${finishedResult.message}`);
+  }
+
+  return {
+    sampleName,
+    wavBlob,
+    sampleDisplayName,
+  };
+}
+
+async function placeSampleIntoProject({
+  sampleName,
+  displayName,
+  durationSeconds,
+  positionSeconds,
+}) {
+  if (!activeDocument) {
+    throw new Error("No connected project document available.");
+  }
+
+  await activeDocument.modify((t) => {
+    const config = t.entities.ofTypes("config").getOne();
+    const bpm = config ? config.fields.tempoBpm.value : 125;
+
+    let track = t.entities.ofTypes("audioTrack").getOne();
+    if (!track) {
+      const device = t.entities.ofTypes("audioDevice").getOne();
+      if (!device) {
+        throw new Error("Could not find an AudioDevice to attach an AudioTrack.");
+      }
+
+      const tracks = t.entities.ofTypes("audioTrack").get();
+      const maxOrder = tracks.reduce(
+        (value, current) => Math.max(value, current.fields.orderAmongTracks.value),
+        -1,
+      );
+
+      track = t.create("audioTrack", {
+        player: device.location,
+        orderAmongTracks: maxOrder + 1,
+      });
+    }
+
+    const sampleEntity = t.create("sample", {
+      sampleName,
+      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
+    });
+    const automationCollection = t.create("automationCollection", {});
+
+    const regionDurationTicks = secondsToTicksAtBpm(durationSeconds, bpm);
+    const regionPositionTicks = Math.max(
+      0,
+      secondsToTicksAtBpm(positionSeconds, bpm),
+    );
+
+    t.create("audioRegion", {
+      track: track.location,
+      playbackAutomationCollection: automationCollection.location,
+      sample: sampleEntity.location,
+      region: {
+        positionTicks: regionPositionTicks,
+        durationTicks: regionDurationTicks,
+        loopDurationTicks: regionDurationTicks,
+        displayName,
+      },
+    });
+  });
+}
+
+async function importSelectedVideoAudio() {
+  if (!selectedVideoFile || !selectedAudioBuffer) {
+    throw new Error("Select a video file before importing audio.");
+  }
+
+  if (!activeDocument) {
+    throw new Error("Connect a project before importing audio.");
+  }
+
+  const importPositionSeconds = Number.isFinite(localVideoPreview.currentTime)
+    ? localVideoPreview.currentTime
+    : 0;
+
+  const uploadResult = await uploadAudioAsSample(
+    selectedVideoFile.name,
+    selectedAudioBuffer,
+  );
+  await placeSampleIntoProject({
+    sampleName: uploadResult.sampleName,
+    displayName: uploadResult.sampleDisplayName,
+    durationSeconds: selectedAudioBuffer.duration,
+    positionSeconds: importPositionSeconds,
+  });
+
+  return {
+    ...uploadResult,
+    importPositionSeconds,
+    durationSeconds: selectedAudioBuffer.duration,
+  };
 }
 
 function getRedirectUrl() {
@@ -358,6 +629,8 @@ function updateControls() {
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
   reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
+  importAudioButton.disabled =
+    !selectedAudioBuffer || !selectedVideoFile || !activeDocument || isImportingAudio;
 }
 
 function queueAudiotoolTask(task) {
@@ -453,6 +726,12 @@ async function connectProject(project) {
       "system",
       `Connected Audiotool project: ${projectReference}`,
     );
+    if (selectedAudioBuffer && selectedVideoFile) {
+      setVideoStatus(
+        `Project connected. Click "Import Video Audio to Connected Project" to transfer ${selectedVideoFile.name}.`,
+        "warn",
+      );
+    }
     appendConsoleLine(
       "system",
       "Project preview updated. If the frame is blocked by browser policy, use Open Project Tab.",
@@ -933,6 +1212,95 @@ reloadPreviewButton.addEventListener("click", () => {
   );
 });
 
+videoFileInput.addEventListener("change", () => {
+  const file = videoFileInput.files?.[0];
+  if (!file) {
+    selectedVideoFile = null;
+    selectedAudioBuffer = null;
+    revokeSelectedVideoUrl();
+    localVideoPreview.removeAttribute("src");
+    setVideoStatus("No video selected yet.", "warn");
+    updateControls();
+    return;
+  }
+
+  queueAudiotoolTask(async () => {
+    selectedVideoFile = file;
+    selectedAudioBuffer = null;
+    revokeSelectedVideoUrl();
+    selectedVideoObjectUrl = URL.createObjectURL(file);
+    localVideoPreview.src = selectedVideoObjectUrl;
+    localVideoPreview.load();
+    setVideoStatus(
+      `Selected ${file.name}. Decoding audio track for import...`,
+      "warn",
+    );
+    updateControls();
+
+    try {
+      const decodedAudio = await decodeAudioTrack(file);
+      selectedAudioBuffer = decodedAudio;
+      setVideoStatus(
+        `Ready: ${file.name} (${formatDuration(decodedAudio.duration)}), ${decodedAudio.numberOfChannels} channels @ ${decodedAudio.sampleRate}Hz.`,
+        "ok",
+      );
+      appendConsoleLine(
+        "system",
+        `Decoded local video audio: ${file.name}, duration ${decodedAudio.duration.toFixed(2)}s.`,
+      );
+    } catch (error) {
+      selectedAudioBuffer = null;
+      const detail = toDisplayString(error);
+      setVideoStatus(
+        `Failed to decode audio from ${file.name}. Try another file. (${detail})`,
+        "error",
+      );
+      appendConsoleLine("error", detail);
+    } finally {
+      updateControls();
+    }
+  });
+});
+
+importAudioButton.addEventListener("click", () => {
+  queueAudiotoolTask(async () => {
+    if (!selectedVideoFile || !selectedAudioBuffer) {
+      setVideoStatus("Select a video file before importing audio.", "warn");
+      return;
+    }
+
+    if (!activeDocument) {
+      setAudiotoolStatus("Connect a project before importing audio.", "warn");
+      return;
+    }
+
+    isImportingAudio = true;
+    updateControls();
+    setVideoStatus("Importing audio to connected project...", "warn");
+
+    try {
+      const result = await importSelectedVideoAudio();
+      const message =
+        `Imported audio sample ${result.sampleName} at ${formatDuration(result.importPositionSeconds)} ` +
+        `for ${formatDuration(result.durationSeconds)} duration. Edit it in Audiotool Studio now.`;
+      setVideoStatus(message, "ok");
+      appendConsoleLine("system", message);
+      setAudiotoolStatus(
+        "Audio imported into project timeline. Open project tab to edit audio.",
+        "ok",
+      );
+    } catch (error) {
+      const detail = toDisplayString(error);
+      setVideoStatus(`Audio import failed: ${detail}`, "error");
+      appendConsoleLine("error", detail);
+      setAudiotoolStatus(`Audio import failed: ${detail}`, "error");
+    } finally {
+      isImportingAudio = false;
+      updateControls();
+    }
+  });
+});
+
 async function initializeAudiotoolAuth() {
   isInitializingAuth = true;
   updateControls();
@@ -978,10 +1346,12 @@ async function initializeAudiotoolAuth() {
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runCode);
 
 setProjectPreview("", "Log in and connect a project to show the Audiotool workspace here.");
+setVideoStatus("No video selected yet. Start by choosing a local video file.", "warn");
 runCode();
 initializeAudiotoolAuth();
 
 window.addEventListener("beforeunload", () => {
+  revokeSelectedVideoUrl();
   if (activeDocument) {
     void activeDocument.stop();
   }

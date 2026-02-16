@@ -113,9 +113,20 @@ body {
   font-size: 0.95rem;
 }
 
+.pane input[type="file"] {
+  width: 100%;
+  border: 1px dashed #36518a;
+  background: #0a142b;
+  color: #d7e4ff;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 0.9rem;
+}
+
 .buttons {
   display: flex;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .buttons button {
@@ -161,6 +172,12 @@ body {
   color: #c4d2f0;
 }
 
+.subheading {
+  margin: 10px 0 0;
+  font-size: 0.95rem;
+  color: #b9cbf2;
+}
+
 .preview-hint {
   margin: 0;
 }
@@ -185,10 +202,19 @@ body {
 #project-preview {
   width: 100%;
   flex: 1;
-  min-height: 760px;
+  min-height: 420px;
   border: 1px solid #25345f;
   border-radius: 8px;
   background: #0a142b;
+}
+
+#local-video-preview {
+  width: 100%;
+  min-height: 280px;
+  max-height: 420px;
+  border-radius: 8px;
+  border: 1px solid #25345f;
+  background: #050912;
 }
 
 .console-section {
