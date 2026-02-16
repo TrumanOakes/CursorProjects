@@ -170,9 +170,9 @@ body {
 
 .panes {
   display: grid;
-  grid-template-columns: minmax(360px, 1fr) minmax(520px, 1.35fr);
+  grid-template-columns: minmax(380px, 1fr) minmax(520px, 1.3fr);
   gap: 16px;
-  min-height: 580px;
+  min-height: 620px;
 }
 
 .pane {
@@ -219,22 +219,10 @@ body {
   transform: translateY(1px);
 }
 
-#editor {
-  flex: 1;
-  min-height: 560px;
-  border: 1px solid #25345f;
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.controls-under-editor {
-  margin-top: 2px;
-}
-
 #project-preview {
   width: 100%;
   flex: 1;
-  min-height: 420px;
+  min-height: 520px;
   border: 1px solid #25345f;
   border-radius: 8px;
   background: #0a142b;

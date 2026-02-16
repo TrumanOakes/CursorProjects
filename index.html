@@ -3,16 +3,16 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Monaco Playground Sandbox</title>
+    <title>Video Audio Importer</title>
   </head>
   <body>
     <div class="layout">
       <header class="toolbar">
         <div class="title">
-          <h1>Monaco JS Playground</h1>
+          <h1>Video Audio Importer for Audiotool</h1>
           <p>
-            Run JavaScript in an isolated iframe, then sync whitelisted changes
-            into an Audiotool project.
+            Import a local video's decoded audio directly into a connected
+            Audiotool project timeline at an exact marker position.
           </p>
         </div>
         <section class="control-card">
@@ -48,28 +48,8 @@
       </header>
 
       <main class="panes">
-        <section class="pane editor-pane">
-          <h2>Editor</h2>
-          <div id="editor"></div>
-          <section class="control-card controls-under-editor">
-            <h2>Playground controls</h2>
-            <label for="packages">Packages (comma-separated)</label>
-            <input
-              id="packages"
-              name="packages"
-              type="text"
-              value="dayjs,lodash-es"
-              placeholder="dayjs,lodash-es,@scope/pkg@1.2.3"
-            />
-            <div class="buttons">
-              <button id="run-btn" type="button">Run</button>
-              <button id="reset-btn" type="button">Reset</button>
-            </div>
-          </section>
-        </section>
-
-        <section class="pane preview-pane">
-          <h2>Local video workflow (frontend only)</h2>
+        <section class="pane workflow-pane">
+          <h2>Local video workflow</h2>
           <label for="video-file-input">Upload/select local video</label>
           <input id="video-file-input" type="file" accept="video/*" />
           <section class="control-card transport-panel">
@@ -118,7 +98,10 @@
           <p id="video-status" class="status-line" data-state="warn">
             No video selected yet.
           </p>
+        </section>
 
+        <section class="pane preview-pane">
+          <h2>Connected project preview</h2>
           <h3 class="subheading">Project context</h3>
           <p class="subtle preview-hint">
             If embedded login fails, use <strong>Open Project Tab</strong> to
@@ -140,8 +123,6 @@
         <summary>Console</summary>
         <pre id="console-output"></pre>
       </details>
-
-      <iframe id="runtime-frame" sandbox="allow-scripts" hidden></iframe>
     </div>
 
     <script type="module" src="/src/main.js"></script>
