@@ -82,24 +82,55 @@ function toDisplayString(value) {
 }
 
 function formatApiErrorDetail(errorLike) {
-  if (errorLike instanceof Error) {
+  const seen = new Set();
+
+  function renderOne(err) {
+    if (!err || typeof err !== "object") {
+      return String(err);
+    }
+    if (seen.has(err)) {
+      return "(circular error cause)";
+    }
+    seen.add(err);
+
     const parts = [];
-    if (errorLike.message) {
-      parts.push(errorLike.message);
+    if (err instanceof Error && err.message) {
+      parts.push(err.message);
     }
-    if (typeof errorLike.code !== "undefined") {
-      parts.push(`code=${String(errorLike.code)}`);
+    if (typeof err.name === "string" && err.name && err.name !== "Error") {
+      parts.push(`name=${err.name}`);
     }
-    if (typeof errorLike.rawMessage === "string" && errorLike.rawMessage) {
-      parts.push(`raw=${errorLike.rawMessage}`);
+    if (typeof err.code !== "undefined") {
+      parts.push(`code=${String(err.code)}`);
+    }
+    if (typeof err.rawMessage === "string" && err.rawMessage) {
+      parts.push(`raw=${err.rawMessage}`);
+    }
+    if (typeof err.details === "string" && err.details) {
+      parts.push(`details=${err.details}`);
+    }
+    if (typeof err.message === "string" && !parts.length) {
+      parts.push(err.message);
     }
 
-    if (parts.length) {
-      return parts.join(" | ");
+    const ownKeys = Object.getOwnPropertyNames(err);
+    if (!parts.length && ownKeys.length) {
+      const entries = ownKeys
+        .filter((key) => key !== "stack" && key !== "cause")
+        .map((key) => `${key}=${toDisplayString(err[key])}`);
+      if (entries.length) {
+        parts.push(entries.join(", "));
+      }
     }
+
+    let text = parts.join(" | ") || toDisplayString(err);
+    if (err.cause) {
+      text = `${text} -> cause: ${renderOne(err.cause)}`;
+    }
+    return text;
   }
 
-  return toDisplayString(errorLike);
+  return renderOne(errorLike);
 }
 
 function isLikelyScopeErrorText(detail) {
@@ -111,6 +142,20 @@ function isLikelyScopeErrorText(detail) {
     text.includes("unauth") ||
     text.includes("denied") ||
     text.includes("403")
+  );
+}
+
+function isLikelyValidationErrorText(detail) {
+  const text = String(detail || "").toLowerCase();
+  return (
+    text.includes("invalid") ||
+    text.includes("argument") ||
+    text.includes("bad request") ||
+    text.includes("out of range") ||
+    text.includes("must be") ||
+    text.includes("failed to parse") ||
+    text.includes("malformed") ||
+    text.includes("400")
   );
 }
 
@@ -705,9 +750,8 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
   const wavBlob = audioBufferToWavBlob(audioBuffer);
   const sampleDisplayName = sanitizeDisplayName(fileName);
 
-  let createResult;
-  try {
-    createResult = await client.api.sampleService.createSample({
+  const sampleCandidates = [
+    {
       sample: {
         displayName: sampleDisplayName,
         description: `Imported from local video file: ${fileName}`,
@@ -715,21 +759,75 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
         usage: 3,
         tags: ["video-import", "local-workflow"],
       },
-    });
-  } catch (error) {
-    const detail = formatApiErrorDetail(error);
-    const maybeScopeHint = isLikelyScopeErrorText(detail)
-      ? ` Required scopes include: ${requiredAudiotoolScopes.join(", ")}. If scopes changed, logout and login again.`
-      : "";
-    throw new Error(`CreateSample call threw: ${detail}.${maybeScopeHint}`);
+      label: "displayName+description+sampleType+usage+tags",
+    },
+    {
+      sample: {
+        displayName: sampleDisplayName,
+        sampleType: 1,
+        usage: 3,
+      },
+      label: "displayName+sampleType+usage",
+    },
+    {
+      sample: {
+        displayName: sampleDisplayName,
+      },
+      label: "displayName-only",
+    },
+    {
+      sample: {},
+      label: "empty-sample",
+    },
+  ];
+
+  let createResult = null;
+  let lastCreateDetail = "CreateSample failed for unknown reason.";
+  for (let index = 0; index < sampleCandidates.length; index += 1) {
+    const candidate = sampleCandidates[index];
+    appendConsoleLine(
+      "system",
+      `CreateSample attempt ${index + 1}/${sampleCandidates.length} (${candidate.label}).`,
+    );
+
+    try {
+      const result = await client.api.sampleService.createSample(candidate);
+      if (!isErrorResult(result)) {
+        createResult = result;
+        break;
+      }
+
+      const detail = formatApiErrorDetail(result);
+      lastCreateDetail = detail;
+      appendConsoleLine(
+        "warn",
+        `CreateSample attempt ${index + 1} failed: ${detail}`,
+      );
+
+      // Validation errors may be caused by payload shape; retry with a smaller payload.
+      if (isLikelyValidationErrorText(detail) && index < sampleCandidates.length - 1) {
+        continue;
+      }
+      break;
+    } catch (error) {
+      const detail = formatApiErrorDetail(error);
+      lastCreateDetail = detail;
+      appendConsoleLine(
+        "warn",
+        `CreateSample attempt ${index + 1} threw: ${detail}`,
+      );
+      if (isLikelyValidationErrorText(detail) && index < sampleCandidates.length - 1) {
+        continue;
+      }
+      break;
+    }
   }
 
-  if (isErrorResult(createResult)) {
-    const detail = formatApiErrorDetail(createResult);
-    const maybeScopeHint = isLikelyScopeErrorText(detail)
+  if (!createResult) {
+    const maybeScopeHint = isLikelyScopeErrorText(lastCreateDetail)
       ? ` Required scopes include: ${requiredAudiotoolScopes.join(", ")}. If scopes changed, logout and login again.`
       : "";
-    throw new Error(`CreateSample failed: ${detail}.${maybeScopeHint}`);
+    throw new Error(`CreateSample failed: ${lastCreateDetail}.${maybeScopeHint}`);
   }
 
   const sampleName = createResult.sample?.name;
@@ -969,6 +1067,11 @@ async function importSelectedVideoAudio() {
     appendConsoleLine(
       "warn",
       "Continuing without sample readiness polling result; project insertion will retry automatically.",
+    );
+  } else {
+    appendConsoleLine(
+      "system",
+      `Sample conversion ready: ${uploadResult.sampleName}`,
     );
   }
 
