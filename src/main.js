@@ -18,6 +18,7 @@ self.MonacoEnvironment = {
 const defaultPackages = "dayjs,lodash-es";
 const audiotoolClientId = "379f8d67-b211-43b2-8a9d-9553aa8aad32";
 const audiotoolScope = "project:write";
+const importedRegionNamePrefix = "[Video Import]";
 const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
   window.location.hostname,
 );
@@ -56,6 +57,17 @@ const disconnectButton = document.getElementById("disconnect-btn");
 const openProjectButton = document.getElementById("open-project-btn");
 const reloadPreviewButton = document.getElementById("reload-preview-btn");
 const importAudioButton = document.getElementById("import-audio-btn");
+const replaceImportedToggle = document.getElementById("replace-imported-toggle");
+const videoPlayPauseButton = document.getElementById("video-play-pause-btn");
+const videoBackFiveButton = document.getElementById("video-back-5-btn");
+const videoForwardFiveButton = document.getElementById("video-forward-5-btn");
+const videoToStartButton = document.getElementById("video-to-start-btn");
+const setImportMarkerButton = document.getElementById("set-import-marker-btn");
+const jumpImportMarkerButton = document.getElementById("jump-import-marker-btn");
+const videoSeekSlider = document.getElementById("video-seek-slider");
+const videoPlayheadLabel = document.getElementById("video-playhead-label");
+const videoDurationLabel = document.getElementById("video-duration-label");
+const importMarkerLabel = document.getElementById("import-marker-label");
 const audiotoolStatusElement = document.getElementById("audiotool-status");
 const redirectUrlElement = document.getElementById("redirect-url");
 const projectPreview = document.getElementById("project-preview");
@@ -79,6 +91,7 @@ let audiotoolQueue = Promise.resolve();
 let selectedVideoFile = null;
 let selectedAudioBuffer = null;
 let selectedVideoObjectUrl = "";
+let importMarkerSeconds = 0;
 
 monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
 monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
@@ -285,6 +298,60 @@ function formatDuration(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+function formatTimestamp(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "00:00.000";
+  }
+
+  const wholeSeconds = Math.floor(seconds);
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainderSeconds = wholeSeconds % 60;
+  const millis = Math.floor((seconds - wholeSeconds) * 1000);
+  return `${String(minutes).padStart(2, "0")}:${String(remainderSeconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function clampVideoTime(seconds) {
+  const safe = Number.isFinite(seconds) ? seconds : 0;
+  const duration = Number.isFinite(localVideoPreview.duration)
+    ? localVideoPreview.duration
+    : 0;
+
+  if (duration <= 0) {
+    return Math.max(0, safe);
+  }
+
+  return Math.min(Math.max(0, safe), duration);
+}
+
+function setImportMarker(seconds) {
+  importMarkerSeconds = clampVideoTime(seconds);
+  importMarkerLabel.textContent = `Import marker: ${formatTimestamp(importMarkerSeconds)}`;
+}
+
+function updateTransportUi() {
+  const hasVideo = Boolean(selectedVideoFile);
+  const duration = Number.isFinite(localVideoPreview.duration)
+    ? localVideoPreview.duration
+    : 0;
+  const current = Number.isFinite(localVideoPreview.currentTime)
+    ? localVideoPreview.currentTime
+    : 0;
+
+  videoPlayPauseButton.disabled = !hasVideo;
+  videoBackFiveButton.disabled = !hasVideo;
+  videoForwardFiveButton.disabled = !hasVideo;
+  videoToStartButton.disabled = !hasVideo;
+  setImportMarkerButton.disabled = !hasVideo;
+  jumpImportMarkerButton.disabled = !hasVideo;
+  videoSeekSlider.disabled = !hasVideo || duration <= 0;
+
+  videoSeekSlider.max = duration > 0 ? String(duration) : "0";
+  videoSeekSlider.value = duration > 0 ? String(clampVideoTime(current)) : "0";
+  videoPlayheadLabel.textContent = `Playhead: ${formatTimestamp(current)}`;
+  videoDurationLabel.textContent = `Duration: ${formatTimestamp(duration)}`;
+  videoPlayPauseButton.textContent = localVideoPreview.paused ? "Play" : "Pause";
+}
+
 function secondsToTicksAtBpm(seconds, bpm) {
   const ticksPerBeat = 3840;
   return Math.max(1, Math.round((seconds * bpm * ticksPerBeat) / 60));
@@ -296,6 +363,10 @@ function sanitizeDisplayName(name) {
     return cleaned.slice(0, 60);
   }
   return "Imported Video Audio";
+}
+
+function buildImportedRegionDisplayName(fileName) {
+  return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
 }
 
 async function uploadAudioAsSample(fileName, audioBuffer) {
@@ -355,15 +426,26 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
 
 async function placeSampleIntoProject({
   sampleName,
-  displayName,
+  regionDisplayName,
   durationSeconds,
   positionSeconds,
+  replacePreviousImports,
 }) {
   if (!activeDocument) {
     throw new Error("No connected project document available.");
   }
 
   await activeDocument.modify((t) => {
+    if (replacePreviousImports) {
+      const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
+      for (const region of existingAudioRegions) {
+        const regionName = region.region.fields.displayName.value || "";
+        if (regionName.startsWith(importedRegionNamePrefix)) {
+          t.remove(region);
+        }
+      }
+    }
+
     const config = t.entities.ofTypes("config").getOne();
     const bpm = config ? config.fields.tempoBpm.value : 125;
 
@@ -406,7 +488,7 @@ async function placeSampleIntoProject({
         positionTicks: regionPositionTicks,
         durationTicks: regionDurationTicks,
         loopDurationTicks: regionDurationTicks,
-        displayName,
+        displayName: regionDisplayName,
       },
     });
   });
@@ -421,9 +503,8 @@ async function importSelectedVideoAudio() {
     throw new Error("Connect a project before importing audio.");
   }
 
-  const importPositionSeconds = Number.isFinite(localVideoPreview.currentTime)
-    ? localVideoPreview.currentTime
-    : 0;
+  const importPositionSeconds = clampVideoTime(importMarkerSeconds);
+  const replacePreviousImports = replaceImportedToggle.checked;
 
   const uploadResult = await uploadAudioAsSample(
     selectedVideoFile.name,
@@ -431,15 +512,17 @@ async function importSelectedVideoAudio() {
   );
   await placeSampleIntoProject({
     sampleName: uploadResult.sampleName,
-    displayName: uploadResult.sampleDisplayName,
+    regionDisplayName: buildImportedRegionDisplayName(selectedVideoFile.name),
     durationSeconds: selectedAudioBuffer.duration,
     positionSeconds: importPositionSeconds,
+    replacePreviousImports,
   });
 
   return {
     ...uploadResult,
     importPositionSeconds,
     durationSeconds: selectedAudioBuffer.duration,
+    replacePreviousImports,
   };
 }
 
@@ -1212,6 +1295,82 @@ reloadPreviewButton.addEventListener("click", () => {
   );
 });
 
+function setVideoCurrentTime(seconds) {
+  localVideoPreview.currentTime = clampVideoTime(seconds);
+  updateTransportUi();
+}
+
+function seekVideoBy(deltaSeconds) {
+  setVideoCurrentTime((localVideoPreview.currentTime || 0) + deltaSeconds);
+}
+
+videoPlayPauseButton.addEventListener("click", () => {
+  if (!selectedVideoFile) {
+    return;
+  }
+
+  if (localVideoPreview.paused) {
+    void localVideoPreview.play();
+  } else {
+    localVideoPreview.pause();
+  }
+  updateTransportUi();
+});
+
+videoBackFiveButton.addEventListener("click", () => {
+  seekVideoBy(-5);
+});
+
+videoForwardFiveButton.addEventListener("click", () => {
+  seekVideoBy(5);
+});
+
+videoToStartButton.addEventListener("click", () => {
+  setVideoCurrentTime(0);
+});
+
+setImportMarkerButton.addEventListener("click", () => {
+  setImportMarker(localVideoPreview.currentTime || 0);
+  appendConsoleLine(
+    "system",
+    `Set import marker to ${formatTimestamp(importMarkerSeconds)}.`,
+  );
+});
+
+jumpImportMarkerButton.addEventListener("click", () => {
+  setVideoCurrentTime(importMarkerSeconds);
+});
+
+videoSeekSlider.addEventListener("input", () => {
+  if (videoSeekSlider.disabled) {
+    return;
+  }
+
+  const next = Number(videoSeekSlider.value);
+  setVideoCurrentTime(next);
+});
+
+localVideoPreview.addEventListener("loadedmetadata", () => {
+  if (!Number.isFinite(importMarkerSeconds) || importMarkerSeconds <= 0) {
+    setImportMarker(0);
+  } else {
+    setImportMarker(importMarkerSeconds);
+  }
+  updateTransportUi();
+});
+
+localVideoPreview.addEventListener("timeupdate", () => {
+  updateTransportUi();
+});
+
+localVideoPreview.addEventListener("play", () => {
+  updateTransportUi();
+});
+
+localVideoPreview.addEventListener("pause", () => {
+  updateTransportUi();
+});
+
 videoFileInput.addEventListener("change", () => {
   const file = videoFileInput.files?.[0];
   if (!file) {
@@ -1219,6 +1378,8 @@ videoFileInput.addEventListener("change", () => {
     selectedAudioBuffer = null;
     revokeSelectedVideoUrl();
     localVideoPreview.removeAttribute("src");
+    setImportMarker(0);
+    updateTransportUi();
     setVideoStatus("No video selected yet.", "warn");
     updateControls();
     return;
@@ -1231,6 +1392,8 @@ videoFileInput.addEventListener("change", () => {
     selectedVideoObjectUrl = URL.createObjectURL(file);
     localVideoPreview.src = selectedVideoObjectUrl;
     localVideoPreview.load();
+    setImportMarker(0);
+    updateTransportUi();
     setVideoStatus(
       `Selected ${file.name}. Decoding audio track for import...`,
       "warn",
@@ -1280,8 +1443,11 @@ importAudioButton.addEventListener("click", () => {
 
     try {
       const result = await importSelectedVideoAudio();
+      const modeText = result.replacePreviousImports
+        ? "replaced previous imported regions and imported"
+        : "imported";
       const message =
-        `Imported audio sample ${result.sampleName} at ${formatDuration(result.importPositionSeconds)} ` +
+        `Successfully ${modeText} audio sample ${result.sampleName} at ${formatDuration(result.importPositionSeconds)} ` +
         `for ${formatDuration(result.durationSeconds)} duration. Edit it in Audiotool Studio now.`;
       setVideoStatus(message, "ok");
       appendConsoleLine("system", message);
@@ -1346,6 +1512,8 @@ async function initializeAudiotoolAuth() {
 editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runCode);
 
 setProjectPreview("", "Log in and connect a project to show the Audiotool workspace here.");
+setImportMarker(0);
+updateTransportUi();
 setVideoStatus("No video selected yet. Start by choosing a local video file.", "warn");
 runCode();
 initializeAudiotoolAuth();

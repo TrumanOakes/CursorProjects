@@ -62,9 +62,11 @@ matches exactly (protocol, path, trailing slash).
 
 1. Upload/select local video.
 2. Connect project.
-3. Click **Import Video Audio to Connected Project**.
-4. Open project tab and edit audio in Audiotool.
-5. Play local video side-by-side as your visual reference.
+3. Use the transport panel to set an **import marker** at the exact playhead.
+4. Optional: toggle **Replace previously imported video audio regions**.
+5. Click **Import Video Audio at Marker**.
+6. Open project tab and edit audio in Audiotool.
+7. Play local video side-by-side as your visual reference.
 
 If your browser or Audiotool headers block embedding, use **Open Project Tab**
 to open the same connected project URL in a full tab.
@@ -135,6 +137,14 @@ The built-in import flow also uses Audiotool's sample APIs:
 
 Then it creates Nexus entities in the synced project (`sample`,
 `automationCollection`, `audioTrack` if needed, and `audioRegion`).
+
+The transport panel provides:
+
+- play/pause
+- seek ±5 seconds
+- jump to start
+- set/jump to marker
+- timeline scrub slider
 
 ---
 
