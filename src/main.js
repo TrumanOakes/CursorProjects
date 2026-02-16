@@ -16,7 +16,7 @@ self.MonacoEnvironment = {
 };
 
 const defaultPackages = "dayjs,lodash-es";
-const audiotoolClientId = "379f8d67-b211-43b2-8a9d-9553aa8aad32";
+const audiotoolClientId = "7c3188d7-220f-4d34-92a6-608acc8ed4eb";
 const audiotoolScope = "project:write";
 const importedRegionNamePrefix = "[Video Import]";
 const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
