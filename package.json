@@ -1,5 +1,5 @@
 {
-  "name": "monaco-js-sandbox",
+  "name": "video-audio-importer",
   "private": true,
   "version": "1.0.0",
   "type": "module",
@@ -9,8 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@audiotool/nexus": "^0.0.11",
-    "monaco-editor": "^0.55.1"
+    "@audiotool/nexus": "^0.0.11"
   },
   "devDependencies": {
     "vite": "^7.3.1"

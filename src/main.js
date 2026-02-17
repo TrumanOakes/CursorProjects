@@ -1,55 +1,16 @@
-import "./style.css";
-import "monaco-editor/min/vs/editor/editor.main.css";
-import * as monaco from "monaco-editor";
-import editorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
-import tsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
-import { createAudiotoolClient, getLoginStatus } from "@audiotool/nexus";
+import {
+  createAudiotoolClient,
+  getLoginStatus,
+} from "./vendor/audiotool-nexus.browser.js";
 
-self.MonacoEnvironment = {
-  getWorker(_moduleId, label) {
-    if (label === "javascript" || label === "typescript") {
-      return new tsWorker();
-    }
-
-    return new editorWorker();
-  },
-};
-
-const defaultPackages = "dayjs,lodash-es";
 const audiotoolClientId = "7c3188d7-220f-4d34-92a6-608acc8ed4eb";
-const audiotoolScope = "project:write";
+const requiredAudiotoolScopes = ["project:write", "sample:write"];
+const audiotoolScope = requiredAudiotoolScopes.join(" ");
 const importedRegionNamePrefix = "[Video Import]";
 const canEmbedAudiotoolStudio = /(^|\.)audiotool\.com$/i.test(
   window.location.hostname,
 );
-const defaultSource = `import dayjs from "dayjs";
-import { startCase } from "lodash-es";
 
-console.log(startCase("video audio playground sandbox is running"));
-console.log("Current time:", dayjs().format("YYYY-MM-DD HH:mm:ss"));
-console.log(
-  "After importing a video's audio into your project, run this script to tweak the first audio region gain."
-);
-
-try {
-  await window.audiotool.apply({
-    ops: [
-      { op: "updateField", entityType: "audioRegion", field: "gain", value: 0.9 },
-    ],
-  });
-  console.log("Applied audioRegion gain edit.");
-} catch (error) {
-  console.warn(
-    "Import a video's audio first, then run again to sync timeline edits.",
-    error,
-  );
-}
-`;
-
-const editorElement = document.getElementById("editor");
-const runButton = document.getElementById("run-btn");
-const resetButton = document.getElementById("reset-btn");
-const packageInput = document.getElementById("packages");
 const projectInput = document.getElementById("project-input");
 const authButton = document.getElementById("auth-btn");
 const connectButton = document.getElementById("connect-btn");
@@ -57,7 +18,10 @@ const disconnectButton = document.getElementById("disconnect-btn");
 const openProjectButton = document.getElementById("open-project-btn");
 const reloadPreviewButton = document.getElementById("reload-preview-btn");
 const importAudioButton = document.getElementById("import-audio-btn");
+const placeSampleButton = document.getElementById("place-sample-btn");
+const sampleNameInput = document.getElementById("sample-name-input");
 const replaceImportedToggle = document.getElementById("replace-imported-toggle");
+
 const videoPlayPauseButton = document.getElementById("video-play-pause-btn");
 const videoBackFiveButton = document.getElementById("video-back-5-btn");
 const videoForwardFiveButton = document.getElementById("video-forward-5-btn");
@@ -68,48 +32,38 @@ const videoSeekSlider = document.getElementById("video-seek-slider");
 const videoPlayheadLabel = document.getElementById("video-playhead-label");
 const videoDurationLabel = document.getElementById("video-duration-label");
 const importMarkerLabel = document.getElementById("import-marker-label");
+
 const audiotoolStatusElement = document.getElementById("audiotool-status");
 const redirectUrlElement = document.getElementById("redirect-url");
 const projectPreview = document.getElementById("project-preview");
 const localVideoPreview = document.getElementById("local-video-preview");
 const videoFileInput = document.getElementById("video-file-input");
 const videoStatusElement = document.getElementById("video-status");
-const runtimeFrame = document.getElementById("runtime-frame");
 const consoleOutput = document.getElementById("console-output");
-
-packageInput.value = defaultPackages;
 
 let loginStatus = null;
 let audiotoolClient = null;
 let activeDocument = null;
 let activeProject = "";
 let activeProjectStudioUrl = "";
+
 let isConnectingProject = false;
-let isInitializingAuth = false;
-let isImportingAudio = false;
-let audiotoolQueue = Promise.resolve();
+let isInitializingAuth = true;
+let isUploadingSample = false;
+let isPlacingSample = false;
+
 let selectedVideoFile = null;
 let selectedAudioBuffer = null;
 let selectedVideoObjectUrl = "";
 let importMarkerSeconds = 0;
+let missingRequiredScopes = [];
+let lastUploadedSampleName = "";
+let lastUploadedSampleDisplayName = "";
+let lastUploadedSampleDurationSeconds = 0;
+let authInitializationError = "";
+let authInitializationPromise = null;
 
-monaco.languages.typescript.javascriptDefaults.setEagerModelSync(true);
-monaco.languages.typescript.javascriptDefaults.setCompilerOptions({
-  allowNonTsExtensions: true,
-  target: monaco.languages.typescript.ScriptTarget.ES2020,
-  moduleResolution: monaco.languages.typescript.ModuleResolutionKind.NodeJs,
-  module: monaco.languages.typescript.ModuleKind.ESNext,
-});
-
-const editor = monaco.editor.create(editorElement, {
-  value: defaultSource,
-  language: "javascript",
-  theme: "vs-dark",
-  minimap: { enabled: false },
-  automaticLayout: true,
-  fontSize: 14,
-  tabSize: 2,
-});
+let audiotoolQueue = Promise.resolve();
 
 function appendConsoleLine(level, message) {
   const line = `[${level}] ${message}`;
@@ -117,65 +71,13 @@ function appendConsoleLine(level, message) {
   consoleOutput.scrollTop = consoleOutput.scrollHeight;
 }
 
-function clearConsole() {
-  consoleOutput.textContent = "";
-}
-
-function parsePackageSpec(spec) {
-  const trimmed = spec.trim();
-
-  if (!trimmed) {
-    return null;
-  }
-
-  if (!trimmed.includes("@")) {
-    return { name: trimmed, version: "" };
-  }
-
-  if (trimmed.startsWith("@")) {
-    const slashIndex = trimmed.indexOf("/");
-    const versionIndex = trimmed.indexOf("@", slashIndex + 1);
-
-    if (slashIndex === -1 || versionIndex === -1) {
-      return { name: trimmed, version: "" };
-    }
-
-    return {
-      name: trimmed.slice(0, versionIndex),
-      version: trimmed.slice(versionIndex + 1),
-    };
-  }
-
-  const versionIndex = trimmed.indexOf("@");
-  return {
-    name: trimmed.slice(0, versionIndex),
-    version: trimmed.slice(versionIndex + 1),
-  };
-}
-
-function parsePackageInput(inputValue) {
-  return inputValue
-    .split(",")
-    .map((entry) => parsePackageSpec(entry))
-    .filter((entry) => entry && entry.name);
-}
-
-function buildImportMap(packageList) {
-  const imports = {};
-
-  for (const pkg of packageList) {
-    const packageId = pkg.version ? `${pkg.name}@${pkg.version}` : pkg.name;
-    const url = `https://esm.sh/${packageId}`;
-    imports[pkg.name] = url;
-    imports[`${pkg.name}/`] = `${url}/`;
-  }
-
-  return { imports };
-}
-
 function toDisplayString(value) {
   if (value instanceof Error) {
-    return value.stack || value.message;
+    const message = typeof value.message === "string" ? value.message.trim() : "";
+    if (message) {
+      return message;
+    }
+    return value.stack || value.name || "Unknown error";
   }
 
   if (typeof value === "string") {
@@ -189,6 +91,161 @@ function toDisplayString(value) {
   }
 }
 
+function formatApiErrorDetail(errorLike) {
+  const seen = new Set();
+
+  function renderOne(err) {
+    if (!err || typeof err !== "object") {
+      return String(err);
+    }
+    if (seen.has(err)) {
+      return "(circular error cause)";
+    }
+    seen.add(err);
+
+    const parts = [];
+    if (err instanceof Error && err.message) {
+      parts.push(err.message);
+    }
+    if (typeof err.name === "string" && err.name && err.name !== "Error") {
+      parts.push(`name=${err.name}`);
+    }
+    if (typeof err.code !== "undefined") {
+      parts.push(`code=${String(err.code)}`);
+    }
+    if (typeof err.rawMessage === "string" && err.rawMessage) {
+      parts.push(`raw=${err.rawMessage}`);
+    }
+    if (typeof err.details === "string" && err.details) {
+      parts.push(`details=${err.details}`);
+    }
+    if (typeof err.message === "string" && !parts.length) {
+      parts.push(err.message);
+    }
+
+    const ownKeys = Object.getOwnPropertyNames(err);
+    if (!parts.length && ownKeys.length) {
+      const entries = ownKeys
+        .filter((key) => key !== "stack" && key !== "cause")
+        .map((key) => `${key}=${toDisplayString(err[key])}`);
+      if (entries.length) {
+        parts.push(entries.join(", "));
+      }
+    }
+
+    let text = parts.join(" | ") || toDisplayString(err);
+    if (err.cause) {
+      text = `${text} -> cause: ${renderOne(err.cause)}`;
+    }
+    return text;
+  }
+
+  return renderOne(errorLike);
+}
+
+function isLikelyScopeErrorText(detail) {
+  const text = String(detail || "").toLowerCase();
+  return (
+    text.includes("scope") ||
+    text.includes("permission") ||
+    text.includes("forbidden") ||
+    text.includes("unauth") ||
+    text.includes("denied") ||
+    text.includes("403")
+  );
+}
+
+function isLikelyValidationErrorText(detail) {
+  const text = String(detail || "").toLowerCase();
+  return (
+    text.includes("invalid") ||
+    text.includes("argument") ||
+    text.includes("bad request") ||
+    text.includes("out of range") ||
+    text.includes("must be") ||
+    text.includes("failed to parse") ||
+    text.includes("malformed") ||
+    text.includes("400")
+  );
+}
+
+function decodeBase64Url(input) {
+  const normalized = input.replace(/-/g, "+").replace(/_/g, "/");
+  const padded =
+    normalized.length % 4 === 0
+      ? normalized
+      : `${normalized}${"=".repeat(4 - (normalized.length % 4))}`;
+  return atob(padded);
+}
+
+function extractGrantedScopesFromToken(token) {
+  if (typeof token !== "string") {
+    return [];
+  }
+
+  const parts = token.split(".");
+  if (parts.length < 2) {
+    return [];
+  }
+
+  try {
+    const payload = JSON.parse(decodeBase64Url(parts[1]));
+    const rawScope =
+      typeof payload.scope === "string"
+        ? payload.scope
+        : typeof payload.scp === "string"
+          ? payload.scp
+          : Array.isArray(payload.scope)
+            ? payload.scope.join(" ")
+            : "";
+    if (!rawScope) {
+      return [];
+    }
+    return rawScope.split(/\s+/).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+async function refreshMissingRequiredScopes() {
+  missingRequiredScopes = [];
+  if (!loginStatus || !loginStatus.loggedIn) {
+    return;
+  }
+
+  const tokenResult = await loginStatus.getToken();
+  if (tokenResult instanceof Error) {
+    appendConsoleLine(
+      "warn",
+      `Could not inspect granted scopes from token: ${formatApiErrorDetail(tokenResult)}`,
+    );
+    return;
+  }
+
+  const grantedScopes = extractGrantedScopesFromToken(tokenResult);
+  if (!grantedScopes.length) {
+    appendConsoleLine(
+      "system",
+      "Could not decode OAuth scopes from token payload; continuing without scope pre-check.",
+    );
+    return;
+  }
+
+  missingRequiredScopes = requiredAudiotoolScopes.filter(
+    (scope) => !grantedScopes.includes(scope),
+  );
+  if (missingRequiredScopes.length) {
+    appendConsoleLine(
+      "warn",
+      `Missing required scopes: ${missingRequiredScopes.join(", ")}. Logout and login again after updating app scopes if needed.`,
+    );
+  }
+}
+
+function isErrorResult(result) {
+  return result instanceof Error;
+}
+
 function setAudiotoolStatus(message, state = "warn") {
   audiotoolStatusElement.textContent = message;
   audiotoolStatusElement.dataset.state = state;
@@ -197,6 +254,87 @@ function setAudiotoolStatus(message, state = "warn") {
 function setVideoStatus(message, state = "warn") {
   videoStatusElement.textContent = message;
   videoStatusElement.dataset.state = state;
+}
+
+function queueAudiotoolTask(task) {
+  const nextTask = audiotoolQueue.then(task, task);
+  audiotoolQueue = nextTask.catch(() => {});
+  return nextTask;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "00:00";
+  }
+
+  const wholeSeconds = Math.floor(seconds);
+  const hours = Math.floor(wholeSeconds / 3600);
+  const minutes = Math.floor((wholeSeconds % 3600) / 60);
+  const remainder = wholeSeconds % 60;
+
+  if (hours > 0) {
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+  }
+
+  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
+}
+
+function formatTimestamp(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "00:00.000";
+  }
+
+  const wholeSeconds = Math.floor(seconds);
+  const minutes = Math.floor(wholeSeconds / 60);
+  const remainderSeconds = wholeSeconds % 60;
+  const millis = Math.floor((seconds - wholeSeconds) * 1000);
+  return `${String(minutes).padStart(2, "0")}:${String(remainderSeconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+}
+
+function clampVideoTime(seconds) {
+  const safe = Number.isFinite(seconds) ? seconds : 0;
+  const duration = Number.isFinite(localVideoPreview.duration)
+    ? localVideoPreview.duration
+    : 0;
+
+  if (duration <= 0) {
+    return Math.max(0, safe);
+  }
+
+  return Math.min(Math.max(0, safe), duration);
+}
+
+function setImportMarker(seconds) {
+  importMarkerSeconds = clampVideoTime(seconds);
+  importMarkerLabel.textContent = `Import marker: ${formatTimestamp(importMarkerSeconds)}`;
+}
+
+function updateTransportUi() {
+  const hasVideo = Boolean(selectedVideoFile);
+  const duration = Number.isFinite(localVideoPreview.duration)
+    ? localVideoPreview.duration
+    : 0;
+  const current = Number.isFinite(localVideoPreview.currentTime)
+    ? localVideoPreview.currentTime
+    : 0;
+
+  videoPlayPauseButton.disabled = !hasVideo;
+  videoBackFiveButton.disabled = !hasVideo;
+  videoForwardFiveButton.disabled = !hasVideo;
+  videoToStartButton.disabled = !hasVideo;
+  setImportMarkerButton.disabled = !hasVideo;
+  jumpImportMarkerButton.disabled = !hasVideo;
+  videoSeekSlider.disabled = !hasVideo || duration <= 0;
+
+  videoSeekSlider.max = duration > 0 ? String(duration) : "0";
+  videoSeekSlider.value = duration > 0 ? String(clampVideoTime(current)) : "0";
+  videoPlayheadLabel.textContent = `Playhead: ${formatTimestamp(current)}`;
+  videoDurationLabel.textContent = `Duration: ${formatTimestamp(duration)}`;
+  videoPlayPauseButton.textContent = localVideoPreview.paused ? "Play" : "Pause";
 }
 
 function revokeSelectedVideoUrl() {
@@ -209,8 +347,12 @@ function revokeSelectedVideoUrl() {
 }
 
 async function decodeAudioTrack(file) {
-  const audioContext = new AudioContext();
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor) {
+    throw new Error("Web Audio API is unavailable in this browser.");
+  }
 
+  const audioContext = new AudioContextCtor();
   try {
     const fileData = await file.arrayBuffer();
     const decoded = await audioContext.decodeAudioData(fileData);
@@ -283,78 +425,31 @@ function audioBufferToWavBlob(audioBuffer) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-function isErrorResult(result) {
-  return result instanceof Error;
-}
-
-function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return "00:00";
+function estimateAudioPeak(audioBuffer) {
+  if (!audioBuffer || audioBuffer.length <= 0) {
+    return 0;
   }
 
-  const wholeSeconds = Math.floor(seconds);
-  const minutes = Math.floor(wholeSeconds / 60);
-  const remainder = wholeSeconds % 60;
-  return `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
-}
+  const sampleWindow = Math.min(audioBuffer.length, 200000);
+  const stride = Math.max(1, Math.floor(audioBuffer.length / sampleWindow));
+  let peak = 0;
 
-function formatTimestamp(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) {
-    return "00:00.000";
+  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+    const channel = audioBuffer.getChannelData(channelIndex);
+    for (let sampleIndex = 0; sampleIndex < channel.length; sampleIndex += stride) {
+      const abs = Math.abs(channel[sampleIndex]);
+      if (abs > peak) {
+        peak = abs;
+      }
+    }
   }
 
-  const wholeSeconds = Math.floor(seconds);
-  const minutes = Math.floor(wholeSeconds / 60);
-  const remainderSeconds = wholeSeconds % 60;
-  const millis = Math.floor((seconds - wholeSeconds) * 1000);
-  return `${String(minutes).padStart(2, "0")}:${String(remainderSeconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
-}
-
-function clampVideoTime(seconds) {
-  const safe = Number.isFinite(seconds) ? seconds : 0;
-  const duration = Number.isFinite(localVideoPreview.duration)
-    ? localVideoPreview.duration
-    : 0;
-
-  if (duration <= 0) {
-    return Math.max(0, safe);
-  }
-
-  return Math.min(Math.max(0, safe), duration);
-}
-
-function setImportMarker(seconds) {
-  importMarkerSeconds = clampVideoTime(seconds);
-  importMarkerLabel.textContent = `Import marker: ${formatTimestamp(importMarkerSeconds)}`;
-}
-
-function updateTransportUi() {
-  const hasVideo = Boolean(selectedVideoFile);
-  const duration = Number.isFinite(localVideoPreview.duration)
-    ? localVideoPreview.duration
-    : 0;
-  const current = Number.isFinite(localVideoPreview.currentTime)
-    ? localVideoPreview.currentTime
-    : 0;
-
-  videoPlayPauseButton.disabled = !hasVideo;
-  videoBackFiveButton.disabled = !hasVideo;
-  videoForwardFiveButton.disabled = !hasVideo;
-  videoToStartButton.disabled = !hasVideo;
-  setImportMarkerButton.disabled = !hasVideo;
-  jumpImportMarkerButton.disabled = !hasVideo;
-  videoSeekSlider.disabled = !hasVideo || duration <= 0;
-
-  videoSeekSlider.max = duration > 0 ? String(duration) : "0";
-  videoSeekSlider.value = duration > 0 ? String(clampVideoTime(current)) : "0";
-  videoPlayheadLabel.textContent = `Playhead: ${formatTimestamp(current)}`;
-  videoDurationLabel.textContent = `Duration: ${formatTimestamp(duration)}`;
-  videoPlayPauseButton.textContent = localVideoPreview.paused ? "Play" : "Pause";
+  return peak;
 }
 
 function secondsToTicksAtBpm(seconds, bpm) {
   const ticksPerBeat = 3840;
-  return Math.max(1, Math.round((seconds * bpm * ticksPerBeat) / 60));
+  return Math.round((seconds * bpm * ticksPerBeat) / 60);
 }
 
 function sanitizeDisplayName(name) {
@@ -369,161 +464,91 @@ function buildImportedRegionDisplayName(fileName) {
   return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
 }
 
-async function uploadAudioAsSample(fileName, audioBuffer) {
+function protobufDurationToSeconds(playDuration) {
+  if (!playDuration) {
+    return 0;
+  }
+
+  const rawSeconds = playDuration.seconds;
+  const seconds =
+    typeof rawSeconds === "bigint"
+      ? Number(rawSeconds)
+      : typeof rawSeconds === "number"
+        ? rawSeconds
+        : typeof rawSeconds === "string"
+          ? Number(rawSeconds)
+          : 0;
+  const nanos = typeof playDuration.nanos === "number" ? playDuration.nanos : 0;
+  const total = seconds + nanos / 1e9;
+  return Number.isFinite(total) && total > 0 ? total : 0;
+}
+
+function buildSampleNameCandidates(rawSampleName) {
+  const trimmed = String(rawSampleName || "").trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const withPrefix = trimmed.startsWith("samples/") ? trimmed : `samples/${trimmed}`;
+  const withoutPrefix = trimmed.replace(/^samples\//, "");
+  return [...new Set([withPrefix, withoutPrefix].filter(Boolean))];
+}
+
+function escapeCelStringLiteral(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function resolveOwnedSampleNameByDisplayName(displayName) {
+  const wantedDisplayName = String(displayName || "").trim();
+  if (!wantedDisplayName) {
+    return "";
+  }
+
   const client = await ensureClient();
-  const wavBlob = audioBufferToWavBlob(audioBuffer);
-  const sampleDisplayName = sanitizeDisplayName(fileName);
+  const filters = [];
 
-  const createResult = await client.api.sampleService.createSample({
-    sample: {
-      displayName: sampleDisplayName,
-      description: `Imported from local video file: ${fileName}`,
-      sampleType: 1,
-      usage: 3,
-      tags: ["video-import", "local-workflow"],
-    },
-  });
-
-  if (isErrorResult(createResult)) {
-    throw new Error(`CreateSample failed: ${createResult.message}`);
-  }
-
-  const sampleName = createResult.sample?.name;
-  const uploadEndpoint = createResult.uploadEndpoint;
-  if (!sampleName || !uploadEndpoint?.uploadUrl) {
-    throw new Error("CreateSample did not return a valid upload endpoint.");
-  }
-
-  const uploadHeaders = new Headers(uploadEndpoint.headers || {});
-  if (!uploadHeaders.has("Content-Type")) {
-    uploadHeaders.set("Content-Type", "audio/wav");
-  }
-
-  const uploadResponse = await fetch(uploadEndpoint.uploadUrl, {
-    method: "PUT",
-    headers: uploadHeaders,
-    body: wavBlob,
-  });
-  if (!uploadResponse.ok) {
-    throw new Error(
-      `Sample upload failed with status ${uploadResponse.status} ${uploadResponse.statusText}.`,
-    );
-  }
-
-  const finishedResult = await client.api.sampleService.uploadSampleFinished({
-    name: sampleName,
-  });
-  if (isErrorResult(finishedResult)) {
-    throw new Error(`UploadSampleFinished failed: ${finishedResult.message}`);
-  }
-
-  return {
-    sampleName,
-    wavBlob,
-    sampleDisplayName,
-  };
-}
-
-async function placeSampleIntoProject({
-  sampleName,
-  regionDisplayName,
-  durationSeconds,
-  positionSeconds,
-  replacePreviousImports,
-}) {
-  if (!activeDocument) {
-    throw new Error("No connected project document available.");
-  }
-
-  await activeDocument.modify((t) => {
-    if (replacePreviousImports) {
-      const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
-      for (const region of existingAudioRegions) {
-        const regionName = region.region.fields.displayName.value || "";
-        if (regionName.startsWith(importedRegionNamePrefix)) {
-          t.remove(region);
-        }
+  try {
+    const authedUserName = await loginStatus?.getUserName?.();
+    if (!(authedUserName instanceof Error)) {
+      const user = String(authedUserName || "").trim();
+      if (user) {
+        const owner = user.startsWith("users/") ? user : `users/${user}`;
+        filters.push(
+          `sample.owner_name == "${escapeCelStringLiteral(owner)}" && sample.display_name == "${escapeCelStringLiteral(wantedDisplayName)}"`,
+        );
       }
     }
+  } catch {
+    // Ignore owner-filter lookup errors and try broader search.
+  }
 
-    const config = t.entities.ofTypes("config").getOne();
-    const bpm = config ? config.fields.tempoBpm.value : 125;
+  filters.push(`sample.display_name == "${escapeCelStringLiteral(wantedDisplayName)}"`);
 
-    let track = t.entities.ofTypes("audioTrack").getOne();
-    if (!track) {
-      const device = t.entities.ofTypes("audioDevice").getOne();
-      if (!device) {
-        throw new Error("Could not find an AudioDevice to attach an AudioTrack.");
-      }
-
-      const tracks = t.entities.ofTypes("audioTrack").get();
-      const maxOrder = tracks.reduce(
-        (value, current) => Math.max(value, current.fields.orderAmongTracks.value),
-        -1,
+  for (const filter of filters) {
+    const listResult = await client.api.sampleService.listSamples({
+      pageSize: 50,
+      filter,
+      orderBy: "sample.create_time desc",
+    });
+    if (isErrorResult(listResult)) {
+      appendConsoleLine(
+        "warn",
+        `ListSamples lookup failed for display name "${wantedDisplayName}": ${formatApiErrorDetail(listResult)}`,
       );
-
-      track = t.create("audioTrack", {
-        player: device.location,
-        orderAmongTracks: maxOrder + 1,
-      });
+      continue;
     }
 
-    const sampleEntity = t.create("sample", {
-      sampleName,
-      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
-    });
-    const automationCollection = t.create("automationCollection", {});
-
-    const regionDurationTicks = secondsToTicksAtBpm(durationSeconds, bpm);
-    const regionPositionTicks = Math.max(
-      0,
-      secondsToTicksAtBpm(positionSeconds, bpm),
+    const matching = (listResult.samples || []).find(
+      (sample) =>
+        String(sample.displayName || "").trim().toLowerCase() ===
+          wantedDisplayName.toLowerCase() && sample.name,
     );
-
-    t.create("audioRegion", {
-      track: track.location,
-      playbackAutomationCollection: automationCollection.location,
-      sample: sampleEntity.location,
-      region: {
-        positionTicks: regionPositionTicks,
-        durationTicks: regionDurationTicks,
-        loopDurationTicks: regionDurationTicks,
-        displayName: regionDisplayName,
-      },
-    });
-  });
-}
-
-async function importSelectedVideoAudio() {
-  if (!selectedVideoFile || !selectedAudioBuffer) {
-    throw new Error("Select a video file before importing audio.");
+    if (matching?.name) {
+      return matching.name;
+    }
   }
 
-  if (!activeDocument) {
-    throw new Error("Connect a project before importing audio.");
-  }
-
-  const importPositionSeconds = clampVideoTime(importMarkerSeconds);
-  const replacePreviousImports = replaceImportedToggle.checked;
-
-  const uploadResult = await uploadAudioAsSample(
-    selectedVideoFile.name,
-    selectedAudioBuffer,
-  );
-  await placeSampleIntoProject({
-    sampleName: uploadResult.sampleName,
-    regionDisplayName: buildImportedRegionDisplayName(selectedVideoFile.name),
-    durationSeconds: selectedAudioBuffer.duration,
-    positionSeconds: importPositionSeconds,
-    replacePreviousImports,
-  });
-
-  return {
-    ...uploadResult,
-    importPositionSeconds,
-    durationSeconds: selectedAudioBuffer.duration,
-    replacePreviousImports,
-  };
+  return "";
 }
 
 function getRedirectUrl() {
@@ -705,6 +730,22 @@ function setProjectPreview(studioUrl, note = "") {
 
 function updateControls() {
   const loggedIn = Boolean(loginStatus && loginStatus.loggedIn);
+  const canUploadSample =
+    loggedIn &&
+    !isConnectingProject &&
+    !isUploadingSample &&
+    !isPlacingSample &&
+    !missingRequiredScopes.length &&
+    Boolean(selectedVideoFile && selectedAudioBuffer);
+  const hasSampleToPlace = Boolean(sampleNameInput.value.trim() || lastUploadedSampleName);
+  const canPlaceSample =
+    loggedIn &&
+    !isConnectingProject &&
+    !isUploadingSample &&
+    !isPlacingSample &&
+    Boolean(activeDocument) &&
+    hasSampleToPlace;
+
   authButton.disabled = isInitializingAuth;
   authButton.textContent = loggedIn ? "Logout" : "Login";
 
@@ -712,40 +753,21 @@ function updateControls() {
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
   reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
-  importAudioButton.disabled =
-    !selectedAudioBuffer || !selectedVideoFile || !activeDocument || isImportingAudio;
-}
+  importAudioButton.disabled = !canUploadSample;
+  placeSampleButton.disabled = !canPlaceSample;
 
-function queueAudiotoolTask(task) {
-  const nextTask = audiotoolQueue.then(task, task);
-  audiotoolQueue = nextTask.catch(() => {});
-  return nextTask;
-}
-
-async function stopActiveDocument(note = "Disconnected from project.") {
-  if (!activeDocument) {
-    return;
+  if (missingRequiredScopes.length) {
+    importAudioButton.title = `Missing OAuth scopes: ${missingRequiredScopes.join(", ")}`;
+  } else {
+    importAudioButton.removeAttribute("title");
   }
 
-  const previousDoc = activeDocument;
-  activeDocument = null;
-  const previousProject = activeProject;
-  activeProject = "";
-  activeProjectStudioUrl = "";
-  setProjectPreview("", "Project preview is disconnected.");
-  updateControls();
-
-  try {
-    await previousDoc.stop();
-    setAudiotoolStatus(note, "warn");
-    appendConsoleLine(
-      "system",
-      `Stopped Audiotool sync for project: ${previousProject || "(unknown)"}`,
-    );
-  } catch (error) {
-    const detail = toDisplayString(error);
-    setAudiotoolStatus(`Failed stopping project: ${detail}`, "error");
-    appendConsoleLine("error", detail);
+  if (!activeDocument) {
+    placeSampleButton.title = "Connect a project before placing samples.";
+  } else if (!hasSampleToPlace) {
+    placeSampleButton.title = "Upload a video sample first or enter sample name.";
+  } else {
+    placeSampleButton.removeAttribute("title");
   }
 }
 
@@ -763,6 +785,35 @@ async function ensureClient() {
   });
 
   return audiotoolClient;
+}
+
+async function stopActiveDocument(note = "Disconnected from project.") {
+  if (!activeDocument) {
+    return;
+  }
+
+  const previousDoc = activeDocument;
+  const previousProject = activeProject;
+
+  activeDocument = null;
+  activeProject = "";
+  activeProjectStudioUrl = "";
+
+  setProjectPreview("", "Project preview is disconnected.");
+  updateControls();
+
+  try {
+    await previousDoc.stop();
+    setAudiotoolStatus(note, "warn");
+    appendConsoleLine(
+      "system",
+      `Stopped Audiotool sync for project: ${previousProject || "(unknown)"}`,
+    );
+  } catch (error) {
+    const detail = toDisplayString(error);
+    setAudiotoolStatus(`Failed stopping project: ${detail}`, "error");
+    appendConsoleLine("error", detail);
+  }
 }
 
 async function connectProject(project) {
@@ -799,38 +850,30 @@ async function connectProject(project) {
     activeDocument = document;
     activeProject = projectReference;
     activeProjectStudioUrl = studioUrl;
+    projectInput.value = studioUrl;
+
     setProjectPreview(
       studioUrl,
       "Project preview could not be loaded in this frame. Open it in a new tab.",
     );
-    projectInput.value = studioUrl;
     setAudiotoolStatus(`Connected to project: ${projectReference}`, "ok");
+    appendConsoleLine("system", `Connected Audiotool project: ${projectReference}`);
     appendConsoleLine(
       "system",
-      `Connected Audiotool project: ${projectReference}`,
+      "Project preview updated. If frame login is blocked, continue in Open Project Tab.",
     );
-    if (selectedAudioBuffer && selectedVideoFile) {
-      setVideoStatus(
-        `Project connected. Click "Import Video Audio to Connected Project" to transfer ${selectedVideoFile.name}.`,
-        "warn",
-      );
-    }
-    appendConsoleLine(
-      "system",
-      "Project preview updated. If the frame is blocked by browser policy, use Open Project Tab.",
-    );
-    appendConsoleLine(
-      "system",
-      "If you see a login error in the embedded preview, allow third-party cookies for audiotool.com or use Open Project Tab.",
-    );
-    appendConsoleLine(
-      "system",
-      "Google sign-in can fail inside iframes. Authenticate in a full tab, then reload preview.",
-    );
+
     if (!canEmbedAudiotoolStudio) {
       appendConsoleLine(
         "system",
         "Embedded preview is disabled on local/non-audiotool hosts. Open Project Tab is the supported local workflow.",
+      );
+    }
+
+    if (selectedAudioBuffer && selectedVideoFile) {
+      setVideoStatus(
+        `Project connected. Click "Import Video Audio at Marker" to transfer ${selectedVideoFile.name}.`,
+        "warn",
       );
     }
   } finally {
@@ -839,393 +882,797 @@ async function connectProject(project) {
   }
 }
 
-function isRecord(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+async function uploadAudioAsSample(fileName, audioBuffer) {
+  const client = await ensureClient();
+  const wavBlob = audioBufferToWavBlob(audioBuffer);
+  const sampleDisplayName = sanitizeDisplayName(fileName);
 
-function asString(value, name) {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`${name} must be a non-empty string.`);
+  const sampleCandidates = [
+    {
+      sample: {
+        displayName: sampleDisplayName,
+        description: `Imported from local video file: ${fileName}`,
+        sampleType: 1,
+        usage: 3,
+        tags: ["video-import", "local-workflow"],
+      },
+      label: "displayName+description+sampleType+usage+tags",
+    },
+    {
+      sample: {
+        displayName: sampleDisplayName,
+        sampleType: 1,
+        usage: 3,
+      },
+      label: "displayName+sampleType+usage",
+    },
+    {
+      sample: {
+        displayName: sampleDisplayName,
+      },
+      label: "displayName-only",
+    },
+    {
+      sample: {},
+      label: "empty-sample",
+    },
+  ];
+
+  let createResult = null;
+  let createResultLabel = "";
+  let lastCreateDetail = "CreateSample failed for unknown reason.";
+  for (let index = 0; index < sampleCandidates.length; index += 1) {
+    const candidate = sampleCandidates[index];
+    appendConsoleLine(
+      "system",
+      `CreateSample attempt ${index + 1}/${sampleCandidates.length} (${candidate.label}).`,
+    );
+
+    try {
+      const result = await client.api.sampleService.createSample(candidate);
+      if (!isErrorResult(result)) {
+        createResult = result;
+        createResultLabel = candidate.label;
+        break;
+      }
+
+      const detail = formatApiErrorDetail(result);
+      lastCreateDetail = detail;
+      appendConsoleLine(
+        "warn",
+        `CreateSample attempt ${index + 1} failed: ${detail}`,
+      );
+
+      // Validation errors may be caused by payload shape; retry with a smaller payload.
+      if (isLikelyValidationErrorText(detail) && index < sampleCandidates.length - 1) {
+        continue;
+      }
+      break;
+    } catch (error) {
+      const detail = formatApiErrorDetail(error);
+      lastCreateDetail = detail;
+      appendConsoleLine(
+        "warn",
+        `CreateSample attempt ${index + 1} threw: ${detail}`,
+      );
+      if (isLikelyValidationErrorText(detail) && index < sampleCandidates.length - 1) {
+        continue;
+      }
+      break;
+    }
   }
 
-  return value.trim();
-}
-
-function resolveEntityFromOp(t, aliases, op) {
-  if (typeof op.entityAlias === "string" && op.entityAlias.trim()) {
-    const entity = aliases.get(op.entityAlias.trim());
-    if (!entity) {
-      throw new Error(`Entity alias "${op.entityAlias}" was not defined.`);
-    }
-    return entity;
+  if (!createResult) {
+    const maybeScopeHint = isLikelyScopeErrorText(lastCreateDetail)
+      ? ` Required scopes include: ${requiredAudiotoolScopes.join(", ")}. If scopes changed, logout and login again.`
+      : "";
+    throw new Error(`CreateSample failed: ${lastCreateDetail}.${maybeScopeHint}`);
   }
 
-  if (typeof op.entityType === "string" && op.entityType.trim()) {
-    const entity = t.entities.ofTypes(op.entityType.trim()).getOne();
-    if (!entity) {
-      throw new Error(`No entity found for type "${op.entityType}".`);
+  const sampleName = createResult.sample?.name;
+  const uploadEndpoint = createResult.uploadEndpoint;
+  if (!sampleName || !uploadEndpoint?.uploadUrl) {
+    throw new Error("CreateSample did not return a valid upload endpoint.");
+  }
+
+  const uploadHeaders = new Headers();
+  for (const [headerName, headerValue] of Object.entries(uploadEndpoint.headers || {})) {
+    if (headerName.toLowerCase() === "host") {
+      continue;
     }
-    return entity;
+    uploadHeaders.set(headerName, headerValue);
+  }
+
+  const uploadResponse = await fetch(uploadEndpoint.uploadUrl, {
+    method: "PUT",
+    headers: uploadHeaders,
+    body: wavBlob,
+  });
+
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `Sample upload failed with status ${uploadResponse.status} ${uploadResponse.statusText}.`,
+    );
+  }
+
+  const finishedResult = await client.api.sampleService.uploadSampleFinished({
+    name: sampleName,
+  });
+  if (isErrorResult(finishedResult)) {
+    throw new Error(`UploadSampleFinished failed: ${formatApiErrorDetail(finishedResult)}`);
+  }
+
+  // Preserve a human-readable sample name even if fallback payloads were needed.
+  if (sampleDisplayName) {
+    const updateCandidates = [
+      {
+        label: "no-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+        },
+      },
+      {
+        label: "snake-case-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+          updateMask: {
+            paths: ["display_name"],
+          },
+        },
+      },
+      {
+        label: "camel-case-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+          updateMask: {
+            paths: ["displayName"],
+          },
+        },
+      },
+    ];
+
+    for (let index = 0; index < updateCandidates.length; index += 1) {
+      const candidate = updateCandidates[index];
+      const updateResult = await client.api.sampleService.updateSample(candidate.payload);
+      if (!isErrorResult(updateResult)) {
+        if (createResultLabel === "empty-sample") {
+          appendConsoleLine(
+            "system",
+            `Recovered sample display name to "${sampleDisplayName}" after empty-sample create fallback.`,
+          );
+        }
+        break;
+      }
+      if (index === updateCandidates.length - 1) {
+        appendConsoleLine(
+          "warn",
+          `Could not enforce sample display name "${sampleDisplayName}": ${formatApiErrorDetail(updateResult)}`,
+        );
+      }
+    }
+  }
+
+  return {
+    sampleName,
+    sampleDisplayName,
+    wavBlob,
+  };
+}
+
+function isSampleReady(sample) {
+  if (!sample) {
+    return false;
+  }
+
+  const hasUrl = (value) => typeof value === "string" && value.trim().length > 0;
+  return Boolean(
+    hasUrl(sample.wavUrl) ||
+      hasUrl(sample.mp3Url) ||
+      hasUrl(sample.flacUrl) ||
+      hasUrl(sample.previewMp3Url),
+  );
+}
+
+function isLikelyPermissionError(error) {
+  const text = toDisplayString(error).toLowerCase();
+  return (
+    text.includes("permission") ||
+    text.includes("forbidden") ||
+    text.includes("unauth") ||
+    text.includes("denied")
+  );
+}
+
+async function waitForSampleReady(sampleName, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 180000;
+  const pollMs = Number.isFinite(opts.pollMs) ? opts.pollMs : 1500;
+
+  const client = await ensureClient();
+  const deadline = Date.now() + timeoutMs;
+  let lastDetail = "Sample conversion is still in progress.";
+
+  while (Date.now() < deadline) {
+    const sampleResult = await client.api.sampleService.getSample({
+      name: sampleName,
+    });
+
+    if (isErrorResult(sampleResult)) {
+      lastDetail = formatApiErrorDetail(sampleResult);
+      if (isLikelyPermissionError(sampleResult)) {
+        appendConsoleLine(
+          "warn",
+          `Skipping sample readiness polling due permissions on getSample: ${lastDetail}`,
+        );
+        return null;
+      }
+      await sleep(pollMs);
+      continue;
+    }
+
+    if (isSampleReady(sampleResult.sample)) {
+      appendConsoleLine(
+        "system",
+        `Sample URLs ready (wav/mp3/flac available): ${sampleName}`,
+      );
+      return sampleResult.sample;
+    }
+
+    lastDetail = "Sample exists but conversion has not finished yet.";
+    await sleep(pollMs);
   }
 
   throw new Error(
-    'Operation must specify "entityAlias" or "entityType" to resolve an entity.',
+    `Sample conversion did not complete in time for ${sampleName}. ${lastDetail}`,
   );
 }
 
-function safeUpdateField(t, fieldRef, value) {
-  if (typeof t.tryUpdate === "function") {
-    const maybeError = t.tryUpdate(fieldRef, value);
-    if (maybeError) {
-      throw maybeError instanceof Error ? maybeError : new Error(String(maybeError));
-    }
-    return;
-  }
-
-  t.update(fieldRef, value);
-}
-
-function applyAudiotoolOperations(t, operations) {
-  const aliases = new Map();
-
-  for (const rawOp of operations) {
-    if (!isRecord(rawOp)) {
-      throw new Error("Each operation must be an object.");
-    }
-
-    const opName = asString(rawOp.op, "op");
-
-    if (opName === "ensureEntity") {
-      const entityType = asString(rawOp.entityType, "entityType");
-      let entity = t.entities.ofTypes(entityType).getOne();
-
-      if (!entity) {
-        const createValues = isRecord(rawOp.create) ? rawOp.create : {};
-        entity = t.create(entityType, createValues);
-      }
-
-      if (typeof rawOp.alias === "string" && rawOp.alias.trim()) {
-        aliases.set(rawOp.alias.trim(), entity);
-      }
-
-      continue;
-    }
-
-    if (opName === "createEntity") {
-      const entityType = asString(rawOp.entityType, "entityType");
-      const createValues = isRecord(rawOp.values) ? rawOp.values : {};
-      const entity = t.create(entityType, createValues);
-
-      if (typeof rawOp.alias === "string" && rawOp.alias.trim()) {
-        aliases.set(rawOp.alias.trim(), entity);
-      }
-
-      continue;
-    }
-
-    if (opName === "updateField") {
-      const entity = resolveEntityFromOp(t, aliases, rawOp);
-      const fieldName = asString(rawOp.field, "field");
-      const fieldRef = entity.fields?.[fieldName];
-
-      if (!fieldRef) {
-        throw new Error(`Field "${fieldName}" does not exist on selected entity.`);
-      }
-
-      safeUpdateField(t, fieldRef, rawOp.value);
-      continue;
-    }
-
-    if (opName === "removeEntity") {
-      const entity = resolveEntityFromOp(t, aliases, rawOp);
-      t.remove(entity);
-      continue;
-    }
-
-    throw new Error(
-      `Unsupported Audiotool operation "${opName}". Supported ops: ensureEntity, createEntity, updateField, removeEntity.`,
-    );
-  }
-}
-
-function validateApplyPayload(rawPayload) {
-  if (!isRecord(rawPayload)) {
-    throw new Error("audiotool.apply payload must be an object.");
-  }
-
-  const project =
-    typeof rawPayload.project === "string" ? rawPayload.project.trim() : "";
-
-  if (!Array.isArray(rawPayload.ops)) {
-    throw new Error('audiotool.apply payload must include an "ops" array.');
-  }
-  if (!rawPayload.ops.length) {
-    throw new Error('audiotool.apply payload "ops" cannot be empty.');
-  }
-  if (rawPayload.ops.length > 50) {
-    throw new Error("audiotool.apply supports up to 50 operations per request.");
-  }
-
-  return { project, ops: rawPayload.ops };
-}
-
-async function ensureRequestedProject(requestedProject) {
-  const fallbackProject = projectInput.value.trim();
-  const targetProject = requestedProject || activeProject || fallbackProject;
-
-  if (!targetProject) {
-    throw new Error(
-      "No project selected. Enter a project URL/UUID and click Connect Project first.",
-    );
-  }
-
-  if (!activeDocument || activeProject !== targetProject) {
-    await connectProject(targetProject);
-  }
-}
-
-function postAudiotoolResult(requestId, response) {
-  const target = runtimeFrame.contentWindow;
-  if (!target) {
-    return;
-  }
-
-  target.postMessage(
-    {
-      source: "audiotool-host",
-      type: "audiotool.result",
-      requestId,
-      ...response,
-    },
-    "*",
+function isLikelySampleNotReadyError(error) {
+  const text = toDisplayString(error).toLowerCase();
+  return (
+    (text.includes("sample") &&
+      (text.includes("not found") ||
+        text.includes("missing") ||
+        text.includes("unknown") ||
+        text.includes("unavailable") ||
+        text.includes("404"))) ||
+    (text.includes("convert") && text.includes("sample"))
   );
 }
 
-async function processAudiotoolApplyRequest(request) {
-  const requestId =
-    typeof request?.requestId === "string" ? request.requestId.trim() : "";
-  if (!requestId) {
-    appendConsoleLine("error", "Ignored audiotool.apply message without requestId.");
-    return;
+async function placeSampleIntoProject({
+  sampleName,
+  regionDisplayName,
+  durationSeconds,
+  positionSeconds,
+  replacePreviousImports,
+}) {
+  if (!activeDocument) {
+    throw new Error("No connected project document available.");
   }
 
-  try {
-    const { project, ops } = validateApplyPayload(request?.payload);
+  let usedTrackId = "";
+  let createdTrack = false;
+  let playbackSource = "seeded-automation-collection";
 
-    await ensureRequestedProject(project);
-    await activeDocument.modify((transaction) => {
-      applyAudiotoolOperations(transaction, ops);
-    });
+  await activeDocument.modify((t) => {
+    const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
+    const previousImportedRegions = [];
+    const removedImportedSampleIds = new Set();
+    const removedImportedPlaybackCollectionIds = new Set();
 
-    setAudiotoolStatus(
-      `Applied ${ops.length} operation(s) to project sync.`,
-      "ok",
+    if (replacePreviousImports) {
+      for (const region of existingAudioRegions) {
+        const regionName = region.fields?.region?.fields?.displayName?.value || "";
+        if (regionName.startsWith(importedRegionNamePrefix)) {
+          previousImportedRegions.push(region);
+          if (region.fields?.sample?.value?.entityId) {
+            removedImportedSampleIds.add(region.fields.sample.value.entityId);
+          }
+          if (region.fields?.playbackAutomationCollection?.value?.entityId) {
+            removedImportedPlaybackCollectionIds.add(
+              region.fields.playbackAutomationCollection.value.entityId,
+            );
+          }
+          t.remove(region);
+        }
+      }
+    }
+
+    const config = t.entities.ofTypes("config").getOne();
+    const bpm = config ? config.fields.tempoBpm.value : 125;
+
+    const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
+    const sampleEntities = t.entities.ofTypes("sample").get();
+    const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
+
+    const trackSortByOrder = (a, b) =>
+      a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
+    const enabledTracks = existingAudioTracks
+      .filter((currentTrack) => currentTrack.fields.isEnabled.value)
+      .sort(trackSortByOrder);
+
+    const nonImportedAudioRegions = existingAudioRegions.filter(
+      (region) =>
+        !(region.fields?.region?.fields?.displayName?.value || "").startsWith(
+          importedRegionNamePrefix,
+        ),
     );
-    appendConsoleLine("system", `Audiotool apply succeeded (${ops.length} ops).`);
-    postAudiotoolResult(requestId, {
-      ok: true,
-      payload: { applied: ops.length, project: activeProject },
-    });
-  } catch (error) {
-    const detail = toDisplayString(error);
-    setAudiotoolStatus(`Apply failed: ${detail}`, "error");
-    appendConsoleLine("error", detail);
+    const preferredTrackIds = new Set(
+      nonImportedAudioRegions.map((region) => region.fields.track.value.entityId),
+    );
+    const enabledPreferredTracks = enabledTracks.filter((currentTrack) =>
+      preferredTrackIds.has(currentTrack.id),
+    );
 
-    if (activeDocument) {
-      await stopActiveDocument(
-        "Document stopped after apply error. Reconnect before retrying.",
+    const previousImportedTrackId =
+      replacePreviousImports && previousImportedRegions.length
+        ? previousImportedRegions[0].fields.track.value.entityId
+        : "";
+    const previousImportedTrack = previousImportedTrackId
+      ? t.entities.ofTypes("audioTrack").getEntity(previousImportedTrackId)
+      : undefined;
+
+    let track =
+      enabledPreferredTracks[0] ||
+      previousImportedTrack ||
+      enabledTracks[0] ||
+      [...existingAudioTracks].sort(trackSortByOrder)[0] ||
+      undefined;
+    if (!track) {
+      const device = t.entities.ofTypes("audioDevice").getOne();
+      if (!device) {
+        throw new Error("Could not find an AudioDevice to attach an AudioTrack.");
+      }
+
+      const tracks = t
+        .entities.ofTypes("audioTrack", "noteTrack", "patternTrack", "automationTrack")
+        .get();
+      const maxOrder = tracks.reduce(
+        (value, current) => Math.max(value, current.fields.orderAmongTracks.value),
+        -1,
       );
+
+      track = t.create("audioTrack", {
+        player: device.location,
+        orderAmongTracks: maxOrder + 1,
+      });
+      createdTrack = true;
     }
 
-    postAudiotoolResult(requestId, {
-      ok: false,
-      error: detail,
+    usedTrackId = track.id;
+    let trackSelectionReason = enabledPreferredTracks[0]
+      ? "enabled-track-with-existing-audio"
+      : previousImportedTrack
+        ? "previous-imported-track"
+        : enabledTracks[0]
+          ? "first-enabled-audio-track"
+          : "first-audio-track";
+
+    const referenceRegionOnTrack = nonImportedAudioRegions.find(
+      (region) =>
+        region.fields.track.value.entityId === track.id &&
+        sampleById.get(region.fields.sample.value.entityId),
+    );
+    const referenceSampleNameOnTrack = referenceRegionOnTrack
+      ? sampleById.get(referenceRegionOnTrack.fields.sample.value.entityId)?.fields
+          .sampleName.value || ""
+      : "";
+    const referencePlaybackCollectionId = referenceRegionOnTrack?.fields
+      ?.playbackAutomationCollection?.value?.entityId
+      ? String(referenceRegionOnTrack.fields.playbackAutomationCollection.value.entityId)
+      : "";
+    const referencePlaybackEvents = referencePlaybackCollectionId
+      ? t.entities
+          .ofTypes("automationEvent")
+          .get()
+          .filter(
+            (event) =>
+              event.fields.collection.value.entityId === referencePlaybackCollectionId,
+          )
+          .sort(
+            (a, b) => a.fields.positionTicks.value - b.fields.positionTicks.value,
+          )
+      : [];
+    const uploadedSampleName = String(sampleName || "");
+    const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
+
+    let sampleNameForDocument = uploadedSampleName;
+    let sampleNameChoiceReason = "resolved sample API naming";
+
+    if (referenceSampleNameOnTrack) {
+      const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
+      sampleNameForDocument = referenceUsesPrefix
+        ? uploadedSampleName
+        : strippedUploadedSampleName;
+      sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
+    }
+    appendConsoleLine(
+      "system",
+      `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
+    );
+    if (!sampleNameForDocument) {
+      throw new Error("Sample name for document placement is empty.");
+    }
+
+    const sampleNameCandidates = new Set([
+      sampleNameForDocument,
+      uploadedSampleName,
+      strippedUploadedSampleName,
+    ]);
+    const allAudioRegionsAfterCleanup = t.entities.ofTypes("audioRegion").get();
+    const referencedSampleIds = new Set(
+      allAudioRegionsAfterCleanup.map(
+        (region) => region.fields.sample.value.entityId,
+      ),
+    );
+    const allSamplesNow = t.entities.ofTypes("sample").get();
+    const matchingSampleEntities = allSamplesNow.filter((entity) =>
+      sampleNameCandidates.has(entity.fields.sampleName.value),
+    );
+    const reusableReferencedSample = matchingSampleEntities.find((entity) =>
+      referencedSampleIds.has(entity.id),
+    );
+
+    let sampleEntity;
+    if (reusableReferencedSample) {
+      sampleEntity = reusableReferencedSample;
+      appendConsoleLine(
+        "system",
+        `Reusing existing referenced sample entity ${sampleEntity.id} (${sampleEntity.fields.sampleName.value}).`,
+      );
+    } else {
+      let removedStaleSamples = 0;
+      for (const candidateEntity of matchingSampleEntities) {
+        if (referencedSampleIds.has(candidateEntity.id)) {
+          continue;
+        }
+        t.remove(candidateEntity);
+        removedStaleSamples += 1;
+      }
+      for (const removedSampleId of removedImportedSampleIds) {
+        if (referencedSampleIds.has(removedSampleId)) {
+          continue;
+        }
+        const removedEntity = t.entities.ofTypes("sample").getEntity(removedSampleId);
+        if (removedEntity) {
+          t.remove(removedEntity);
+          removedStaleSamples += 1;
+        }
+      }
+      if (removedStaleSamples > 0) {
+        appendConsoleLine(
+          "system",
+          `Removed ${removedStaleSamples} stale sample entity/candidates before inserting new region.`,
+        );
+      }
+
+      sampleEntity = t.create("sample", {
+        sampleName: sampleNameForDocument,
+        // Sample is already uploaded and conversion-ready before placement.
+        uploadStartTime: BigInt(0),
+      });
+    }
+
+    const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
+    const regionPositionTicks = Math.max(0, secondsToTicksAtBpm(positionSeconds, bpm));
+    const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
+
+    const playbackAutomationCollection = t.create("automationCollection", {});
+    const referenceInterpolation = referencePlaybackEvents.length
+      ? referencePlaybackEvents[0].fields.interpolation.value
+      : 1;
+    const playbackInterpolation = [1, 2].includes(referenceInterpolation)
+      ? referenceInterpolation
+      : 1;
+    // Playback automation value is normalized sample position (0..1), so a ramp
+    // across the region is required for audible playback.
+    t.create("automationEvent", {
+      collection: playbackAutomationCollection.location,
+      positionTicks: 0,
+      value: 0,
+      interpolation: playbackInterpolation,
     });
-  }
-}
+    t.create("automationEvent", {
+      collection: playbackAutomationCollection.location,
+      positionTicks: regionDurationTicks,
+      value: 1,
+      interpolation: playbackInterpolation,
+    });
+    appendConsoleLine(
+      "system",
+      `Playback automation seeded with normalized ramp 0->1 over ${regionDurationTicks} ticks (interpolation=${playbackInterpolation}).`,
+    );
+    playbackSource = "normalized-ramp-automation";
 
-function escapeScriptContent(code) {
-  return code.replaceAll("</script>", "<\\/script>");
-}
+    t.create("audioRegion", {
+      track: track.location,
+      playbackAutomationCollection: playbackAutomationCollection.location,
+      sample: sampleEntity.location,
+      gain: 1,
+      fadeInDurationTicks: safeFadeTicks,
+      fadeOutDurationTicks: safeFadeTicks,
+      // 2 = time stretch mode (preserve pitch), DAW default.
+      timestretchMode: 2,
+      region: {
+        positionTicks: regionPositionTicks,
+        durationTicks: regionDurationTicks,
+        loopDurationTicks: regionDurationTicks,
+        displayName: regionDisplayName,
+      },
+    });
 
-function createPreviewDocument(sourceCode, importMap) {
-  const safeSource = escapeScriptContent(sourceCode);
-  const safeImportMap = escapeScriptContent(JSON.stringify(importMap, null, 2));
+    if (!track.fields.isEnabled.value) {
+      t.update(track.fields.isEnabled, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-track-enabled`;
+    }
+    const trackPlayer = track.fields.player.value;
+    const audioDevice = trackPlayer?.entityId
+      ? t.entities.ofTypes("audioDevice").getEntity(trackPlayer.entityId)
+      : undefined;
+    if (audioDevice && !audioDevice.fields.isActive.value) {
+      t.update(audioDevice.fields.isActive, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-device-active`;
+    }
+    playbackSource = `${playbackSource},track=${trackSelectionReason}`;
 
-  return `<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <style>
-      body {
-        margin: 0;
-        padding: 16px;
-        font-family: Inter, system-ui, -apple-system, sans-serif;
-        background: #f8fafc;
-        color: #0f172a;
+    if (replacePreviousImports && removedImportedPlaybackCollectionIds.size) {
+      const remainingRegions = t.entities.ofTypes("audioRegion").get();
+      const usedCollections = new Set(
+        remainingRegions.map(
+          (region) => region.fields.playbackAutomationCollection.value.entityId,
+        ),
+      );
+      const allAutomationEvents = t.entities.ofTypes("automationEvent").get();
+      let removedCollections = 0;
+      let removedEvents = 0;
+      for (const collectionId of removedImportedPlaybackCollectionIds) {
+        if (usedCollections.has(collectionId)) {
+          continue;
+        }
+        for (const event of allAutomationEvents) {
+          if (event.fields.collection.value.entityId === collectionId) {
+            t.remove(event);
+            removedEvents += 1;
+          }
+        }
+        const collectionEntity = t
+          .entities.ofTypes("automationCollection")
+          .getEntity(collectionId);
+        if (collectionEntity) {
+          t.remove(collectionEntity);
+          removedCollections += 1;
+        }
       }
-
-      #app {
-        min-height: 40px;
+      if (removedCollections || removedEvents) {
+        appendConsoleLine(
+          "system",
+          `Removed ${removedEvents} stale automation events and ${removedCollections} stale playback collections.`,
+        );
       }
-    </style>
-  </head>
-  <body>
-    <div id="app"></div>
-    <script>
-      const toStringValue = (value) => {
-        if (value instanceof Error) {
-          return value.stack || value.message;
-        }
+    }
+  });
 
-        if (typeof value === "string") {
-          return value;
-        }
-
-        try {
-          return JSON.stringify(value, null, 2);
-        } catch {
-          return String(value);
-        }
-      };
-
-      const send = (type, payload) => {
-        parent.postMessage({ source: "monaco-playground", type, payload }, "*");
-      };
-
-      const pendingAudiotoolRequests = new Map();
-
-      ["log", "info", "warn", "error"].forEach((method) => {
-        const original = console[method].bind(console);
-        console[method] = (...args) => {
-          send("console", {
-            method,
-            messages: args.map((arg) => toStringValue(arg)),
-          });
-          original(...args);
-        };
-      });
-
-      window.addEventListener("error", (event) => {
-        send("runtime-error", {
-          message: event.message,
-          stack: event.error ? event.error.stack : "",
-        });
-      });
-
-      window.addEventListener("unhandledrejection", (event) => {
-        send("runtime-error", {
-          message: "Unhandled promise rejection",
-          stack: toStringValue(event.reason),
-        });
-      });
-
-      window.addEventListener("message", (event) => {
-        const message = event.data;
-        if (!message || message.source !== "audiotool-host") {
-          return;
-        }
-        if (message.type !== "audiotool.result") {
-          return;
-        }
-
-        const pending = pendingAudiotoolRequests.get(message.requestId);
-        if (!pending) {
-          return;
-        }
-
-        pendingAudiotoolRequests.delete(message.requestId);
-
-        if (message.ok) {
-          pending.resolve(message.payload);
-        } else {
-          pending.reject(new Error(message.error || "Audiotool apply failed."));
-        }
-      });
-
-      window.audiotool = {
-        apply(payload) {
-          return new Promise((resolve, reject) => {
-            const requestId =
-              globalThis.crypto?.randomUUID?.() ||
-              \`req-\${Date.now()}-\${Math.random().toString(16).slice(2)}\`;
-
-            pendingAudiotoolRequests.set(requestId, { resolve, reject });
-            send("audiotool.apply", { requestId, payload });
-          });
-        },
-      };
-    </script>
-    <script type="importmap">
-${safeImportMap}
-    </script>
-    <script type="module">
-${safeSource}
-    </script>
-  </body>
-</html>`;
-}
-
-function runCode() {
-  clearConsole();
-  const packageList = parsePackageInput(packageInput.value);
-  const importMap = buildImportMap(packageList);
-  const sourceCode = editor.getValue();
-  const html = createPreviewDocument(sourceCode, importMap);
-
-  runtimeFrame.srcdoc = html;
-
-  const packageLabel = packageList.length
-    ? packageList
-        .map((pkg) => (pkg.version ? `${pkg.name}@${pkg.version}` : pkg.name))
-        .join(", ")
-    : "(none)";
-
-  appendConsoleLine("system", `Running with packages: ${packageLabel}`);
   appendConsoleLine(
     "system",
-    "Script runtime is hidden; use project preview and console to inspect results.",
+    `Placed imported audio region on track ${usedTrackId || "(unknown)"}${createdTrack ? " (new track created)" : ""}; playback source=${playbackSource}.`,
   );
 }
 
-window.addEventListener("message", (event) => {
-  if (event.source !== runtimeFrame.contentWindow) {
-    return;
+async function placeSampleIntoProjectWithRetry(args) {
+  const retryWaitsMs = [0, 1000, 2000, 3500];
+  let lastError = null;
+
+  for (let attempt = 0; attempt < retryWaitsMs.length; attempt += 1) {
+    if (retryWaitsMs[attempt] > 0) {
+      await sleep(retryWaitsMs[attempt]);
+    }
+
+    try {
+      await placeSampleIntoProject(args);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isLikelySampleNotReadyError(error) || attempt === retryWaitsMs.length - 1) {
+        throw error;
+      }
+    }
   }
 
-  const payload = event.data;
-  if (!payload || payload.source !== "monaco-playground") {
-    return;
+  if (lastError) {
+    throw lastError;
+  }
+}
+
+async function uploadSelectedVideoAudioSample() {
+  if (!selectedVideoFile || !selectedAudioBuffer) {
+    throw new Error("Select a video file before uploading audio.");
   }
 
-  if (payload.type === "console") {
-    const text = payload.payload.messages.join(" ");
-    appendConsoleLine(payload.payload.method, text);
-    return;
-  }
-
-  if (payload.type === "runtime-error") {
-    const detail = payload.payload.stack || payload.payload.message;
-    appendConsoleLine("error", detail);
-    return;
-  }
-
-  if (payload.type === "audiotool.apply") {
-    queueAudiotoolTask(() => processAudiotoolApplyRequest(payload.payload)).catch(
-      (error) => {
-        appendConsoleLine("error", toDisplayString(error));
-      },
+  if (missingRequiredScopes.length) {
+    throw new Error(
+      `Missing OAuth scopes: ${missingRequiredScopes.join(", ")}. Click Logout, then Login to grant updated permissions.`,
     );
   }
-});
 
-runButton.addEventListener("click", runCode);
-resetButton.addEventListener("click", () => {
-  editor.setValue(defaultSource);
-  packageInput.value = defaultPackages;
-  runCode();
-});
+  const importPositionSeconds = clampVideoTime(importMarkerSeconds);
+  const replacePreviousImports = replaceImportedToggle.checked;
+
+  setVideoStatus("Uploading decoded audio as a new sample...", "warn");
+  const uploadResult = await uploadAudioAsSample(
+    selectedVideoFile.name,
+    selectedAudioBuffer,
+  );
+
+  setVideoStatus("Waiting for sample conversion to finish...", "warn");
+  const readySample = await waitForSampleReady(uploadResult.sampleName);
+  if (!readySample) {
+    appendConsoleLine(
+      "warn",
+      "Continuing without sample readiness polling result; project insertion will retry automatically.",
+    );
+  } else {
+    appendConsoleLine(
+      "system",
+      `Sample conversion ready: ${uploadResult.sampleName}`,
+    );
+  }
+
+  const durationSeconds =
+    protobufDurationToSeconds(readySample?.playDuration) || selectedAudioBuffer.duration;
+  lastUploadedSampleName = uploadResult.sampleName;
+  lastUploadedSampleDisplayName = String(uploadResult.sampleDisplayName || "").trim();
+  lastUploadedSampleDurationSeconds = durationSeconds;
+  sampleNameInput.value = lastUploadedSampleDisplayName || String(uploadResult.sampleName || "");
+  appendConsoleLine(
+    "system",
+    `Sample uploaded as ${uploadResult.sampleName} (display "${lastUploadedSampleDisplayName || uploadResult.sampleName}"). Timeline placement default set to ${sampleNameInput.value}.`,
+  );
+
+  return {
+    ...uploadResult,
+    importPositionSeconds,
+    durationSeconds,
+    replacePreviousImports,
+  };
+}
+
+async function resolveSampleForPlacement(rawSampleName) {
+  const trimmedInput = String(rawSampleName || "").trim();
+  const candidates = buildSampleNameCandidates(trimmedInput);
+  if (!trimmedInput || !candidates.length) {
+    throw new Error("Sample name is required for timeline placement.");
+  }
+
+  const attemptedCandidates = new Set();
+  let lastError = null;
+
+  const tryResolveCandidates = async (candidateList, sourceLabel) => {
+    for (const candidate of candidateList) {
+      const normalizedCandidate = String(candidate || "").trim();
+      if (!normalizedCandidate || attemptedCandidates.has(normalizedCandidate)) {
+        continue;
+      }
+      attemptedCandidates.add(normalizedCandidate);
+      try {
+        appendConsoleLine("system", `Resolving sample for placement (${sourceLabel}): ${normalizedCandidate}`);
+        const resolvedSample = await waitForSampleReady(normalizedCandidate, {
+          timeoutMs: 45000,
+          pollMs: 1200,
+        });
+        return { sampleName: normalizedCandidate, sample: resolvedSample };
+      } catch (error) {
+        lastError = error;
+        appendConsoleLine(
+          "warn",
+          `Sample resolve attempt failed for ${normalizedCandidate}: ${toDisplayString(error)}`,
+        );
+      }
+    }
+    return null;
+  };
+
+  const directResolved = await tryResolveCandidates(candidates, "direct-name");
+  if (directResolved) {
+    return directResolved;
+  }
+
+  const displayNameResolvedSample = await resolveOwnedSampleNameByDisplayName(trimmedInput);
+  if (displayNameResolvedSample) {
+    appendConsoleLine(
+      "system",
+      `Resolved display name "${trimmedInput}" to sample id ${displayNameResolvedSample}.`,
+    );
+    const resolvedByDisplayName = await tryResolveCandidates(
+      buildSampleNameCandidates(displayNameResolvedSample),
+      "display-name",
+    );
+    if (resolvedByDisplayName) {
+      return resolvedByDisplayName;
+    }
+  }
+
+  throw new Error(
+    `Could not resolve sample "${trimmedInput}" for timeline placement: ${toDisplayString(lastError)}`,
+  );
+}
+
+async function placeChosenSampleAtMarker() {
+  if (!activeDocument) {
+    throw new Error("Connect a project before placing a sample on timeline.");
+  }
+
+  const rawSampleInput = sampleNameInput.value.trim();
+  const sampleReference =
+    rawSampleInput && rawSampleInput !== lastUploadedSampleDisplayName
+      ? rawSampleInput
+      : lastUploadedSampleName || rawSampleInput;
+  if (!sampleReference) {
+    throw new Error("Upload a sample first or enter a sample name to place.");
+  }
+
+  const importPositionSeconds = clampVideoTime(importMarkerSeconds);
+  const replacePreviousImports = replaceImportedToggle.checked;
+
+  setVideoStatus("Resolving selected sample before timeline placement...", "warn");
+  const resolved = await resolveSampleForPlacement(sampleReference);
+  const documentSampleName = String(resolved.sample?.name || resolved.sampleName || "").trim();
+  if (!documentSampleName) {
+    throw new Error("Resolved sample name is empty. Upload or choose a valid sample first.");
+  }
+  const displayNameForUi =
+    String(resolved.sample?.displayName || "").trim() ||
+    rawSampleInput ||
+    lastUploadedSampleDisplayName ||
+    documentSampleName;
+  appendConsoleLine(
+    "system",
+    `Resolved sample API name ${resolved.sampleName} (display "${displayNameForUi}"); placing with document sample name ${documentSampleName}.`,
+  );
+  const durationSeconds =
+    protobufDurationToSeconds(resolved.sample?.playDuration) ||
+    lastUploadedSampleDurationSeconds ||
+    selectedAudioBuffer?.duration ||
+    8;
+
+  await sleep(700);
+  setVideoStatus("Placing selected sample region into project timeline...", "warn");
+  await placeSampleIntoProjectWithRetry({
+    sampleName: documentSampleName,
+    regionDisplayName: buildImportedRegionDisplayName(
+      selectedVideoFile?.name || displayNameForUi,
+    ),
+    durationSeconds,
+    positionSeconds: importPositionSeconds,
+    replacePreviousImports,
+  });
+
+  return {
+    sampleName: documentSampleName,
+    sampleDisplayName: displayNameForUi,
+    resolvedApiSampleName: resolved.sampleName,
+    importPositionSeconds,
+    durationSeconds,
+    replacePreviousImports,
+  };
+}
+
+function setVideoCurrentTime(seconds) {
+  localVideoPreview.currentTime = clampVideoTime(seconds);
+  updateTransportUi();
+}
+
+function seekVideoBy(deltaSeconds) {
+  setVideoCurrentTime((localVideoPreview.currentTime || 0) + deltaSeconds);
+}
 
 projectInput.addEventListener("input", () => {
   if (activeProject && projectInput.value.trim() !== activeProject) {
@@ -1237,8 +1684,27 @@ projectInput.addEventListener("input", () => {
 });
 
 authButton.addEventListener("click", async () => {
+  if (isInitializingAuth) {
+    setAudiotoolStatus("Authentication is still initializing, please wait...", "warn");
+    return;
+  }
+
   if (!loginStatus) {
-    setAudiotoolStatus("Auth status not ready yet, try again.", "warn");
+    setAudiotoolStatus(
+      authInitializationError
+        ? `Auth not initialized: ${authInitializationError}`
+        : "Auth status not ready yet. Reinitializing auth...",
+      "warn",
+    );
+    await initializeAudiotoolAuth(true);
+    if (!loginStatus) {
+      setAudiotoolStatus(
+        authInitializationError
+          ? `Auth still not initialized: ${authInitializationError}`
+          : "Auth initialization did not complete. Check redirect URL/app settings.",
+        "error",
+      );
+    }
     return;
   }
 
@@ -1291,18 +1757,9 @@ reloadPreviewButton.addEventListener("click", () => {
   );
   appendConsoleLine(
     "system",
-    "Preview reloaded. If login still fails inside iframe, continue in Open Project Tab.",
+    "Preview reloaded. If login still fails in iframe, continue in Open Project Tab.",
   );
 });
-
-function setVideoCurrentTime(seconds) {
-  localVideoPreview.currentTime = clampVideoTime(seconds);
-  updateTransportUi();
-}
-
-function seekVideoBy(deltaSeconds) {
-  setVideoCurrentTime((localVideoPreview.currentTime || 0) + deltaSeconds);
-}
 
 videoPlayPauseButton.addEventListener("click", () => {
   if (!selectedVideoFile) {
@@ -1376,6 +1833,10 @@ videoFileInput.addEventListener("change", () => {
   if (!file) {
     selectedVideoFile = null;
     selectedAudioBuffer = null;
+    lastUploadedSampleName = "";
+    lastUploadedSampleDisplayName = "";
+    lastUploadedSampleDurationSeconds = 0;
+    sampleNameInput.value = "";
     revokeSelectedVideoUrl();
     localVideoPreview.removeAttribute("src");
     setImportMarker(0);
@@ -1388,6 +1849,10 @@ videoFileInput.addEventListener("change", () => {
   queueAudiotoolTask(async () => {
     selectedVideoFile = file;
     selectedAudioBuffer = null;
+    lastUploadedSampleName = "";
+    lastUploadedSampleDisplayName = "";
+    lastUploadedSampleDurationSeconds = 0;
+    sampleNameInput.value = "";
     revokeSelectedVideoUrl();
     selectedVideoObjectUrl = URL.createObjectURL(file);
     localVideoPreview.src = selectedVideoObjectUrl;
@@ -1402,16 +1867,31 @@ videoFileInput.addEventListener("change", () => {
 
     try {
       const decodedAudio = await decodeAudioTrack(file);
+      if (selectedVideoFile !== file) {
+        return;
+      }
+
       selectedAudioBuffer = decodedAudio;
+      const peak = estimateAudioPeak(decodedAudio);
       setVideoStatus(
         `Ready: ${file.name} (${formatDuration(decodedAudio.duration)}), ${decodedAudio.numberOfChannels} channels @ ${decodedAudio.sampleRate}Hz.`,
         "ok",
       );
       appendConsoleLine(
         "system",
-        `Decoded local video audio: ${file.name}, duration ${decodedAudio.duration.toFixed(2)}s.`,
+        `Decoded local video audio: ${file.name}, duration ${decodedAudio.duration.toFixed(2)}s, peak ${peak.toFixed(4)}.`,
       );
+      if (peak < 0.0005) {
+        appendConsoleLine(
+          "warn",
+          "Decoded audio appears near-silent (very low peak). The source video may not contain audible track data.",
+        );
+      }
     } catch (error) {
+      if (selectedVideoFile !== file) {
+        return;
+      }
+
       selectedAudioBuffer = null;
       const detail = toDisplayString(error);
       setVideoStatus(
@@ -1425,97 +1905,175 @@ videoFileInput.addEventListener("change", () => {
   });
 });
 
+sampleNameInput.addEventListener("input", () => {
+  updateControls();
+});
+
 importAudioButton.addEventListener("click", () => {
   queueAudiotoolTask(async () => {
-    if (!selectedVideoFile || !selectedAudioBuffer) {
-      setVideoStatus("Select a video file before importing audio.", "warn");
-      return;
-    }
-
-    if (!activeDocument) {
-      setAudiotoolStatus("Connect a project before importing audio.", "warn");
-      return;
-    }
-
-    isImportingAudio = true;
+    await refreshMissingRequiredScopes();
     updateControls();
-    setVideoStatus("Importing audio to connected project...", "warn");
+
+    if (!selectedVideoFile || !selectedAudioBuffer) {
+      setVideoStatus("Select a video file before uploading audio as sample.", "warn");
+      return;
+    }
+
+    isUploadingSample = true;
+    updateControls();
 
     try {
-      const result = await importSelectedVideoAudio();
-      const modeText = result.replacePreviousImports
-        ? "replaced previous imported regions and imported"
-        : "imported";
+      const result = await uploadSelectedVideoAudioSample();
+      const uploadedLabel = result.sampleDisplayName || result.sampleName;
       const message =
-        `Successfully ${modeText} audio sample ${result.sampleName} at ${formatDuration(result.importPositionSeconds)} ` +
-        `for ${formatDuration(result.durationSeconds)} duration. Edit it in Audiotool Studio now.`;
+        `Successfully uploaded audio sample "${uploadedLabel}" for ${formatDuration(result.durationSeconds)} duration. ` +
+        `Now click "Place Sample on Timeline at Marker".`;
+
       setVideoStatus(message, "ok");
-      appendConsoleLine("system", message);
       setAudiotoolStatus(
-        "Audio imported into project timeline. Open project tab to edit audio.",
+        "Sample upload complete. Place sample on timeline with the new button.",
         "ok",
       );
+      appendConsoleLine("system", message);
     } catch (error) {
       const detail = toDisplayString(error);
-      setVideoStatus(`Audio import failed: ${detail}`, "error");
+      setVideoStatus(`Audio sample upload failed: ${detail}`, "error");
+      setAudiotoolStatus(`Audio sample upload failed: ${detail}`, "error");
       appendConsoleLine("error", detail);
-      setAudiotoolStatus(`Audio import failed: ${detail}`, "error");
     } finally {
-      isImportingAudio = false;
+      isUploadingSample = false;
       updateControls();
     }
   });
 });
 
-async function initializeAudiotoolAuth() {
-  isInitializingAuth = true;
-  updateControls();
-  setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
+placeSampleButton.addEventListener("click", () => {
+  queueAudiotoolTask(async () => {
+    if (!activeDocument) {
+      setAudiotoolStatus("Connect a project before placing sample on timeline.", "warn");
+      return;
+    }
 
-  const redirectUrl = getRedirectUrl();
-  redirectUrlElement.textContent = redirectUrl;
+    const rawSampleName = sampleNameInput.value.trim() || lastUploadedSampleName;
+    if (!rawSampleName) {
+      setVideoStatus("Upload a sample first or enter a sample name to place.", "warn");
+      return;
+    }
 
-  try {
-    loginStatus = await getLoginStatus({
-      clientId: audiotoolClientId,
-      redirectUrl,
-      scope: audiotoolScope,
-    });
+    isPlacingSample = true;
+    updateControls();
 
-    if (loginStatus.loggedIn) {
-      const userName = await loginStatus.getUserName();
-      setAudiotoolStatus(
-        `Logged in as ${toDisplayString(userName)}. Connect a project to start syncing.`,
-        "ok",
-      );
-      await ensureClient();
-      appendConsoleLine("system", "Audiotool client initialized.");
-      if (!canEmbedAudiotoolStudio) {
-        setAudiotoolStatus(
-          "Logged in. Embedded preview is disabled on this host; use Open Project Tab for Studio.",
-          "warn",
+    try {
+      const result = await placeChosenSampleAtMarker();
+      const modeText = result.replacePreviousImports
+        ? "replaced previous imported regions and placed"
+        : "placed";
+      const placedLabel = result.sampleDisplayName || result.sampleName;
+      const message =
+        `Successfully ${modeText} sample "${placedLabel}" at ${formatTimestamp(result.importPositionSeconds)} ` +
+        `for ${formatDuration(result.durationSeconds)} duration.`;
+      if (result.resolvedApiSampleName && result.resolvedApiSampleName !== result.sampleName) {
+        appendConsoleLine(
+          "system",
+          `Placement used document sample name ${result.sampleName} (resolved API sample ${result.resolvedApiSampleName}).`,
         );
       }
-    } else {
-      setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
+      setVideoStatus(message, "ok");
+      setAudiotoolStatus(
+        "Sample region placed on project timeline. Open project tab to verify waveform.",
+        "ok",
+      );
+      appendConsoleLine("system", message);
+    } catch (error) {
+      const detail = toDisplayString(error);
+      setVideoStatus(`Placing sample on timeline failed: ${detail}`, "error");
+      setAudiotoolStatus(`Placing sample on timeline failed: ${detail}`, "error");
+      appendConsoleLine("error", detail);
+    } finally {
+      isPlacingSample = false;
+      updateControls();
     }
-  } catch (error) {
-    const detail = toDisplayString(error);
-    setAudiotoolStatus(`Auth setup failed: ${detail}`, "error");
-    appendConsoleLine("error", detail);
-  } finally {
-    isInitializingAuth = false;
+  });
+});
+
+async function initializeAudiotoolAuth(force = false) {
+  if (authInitializationPromise && !force) {
+    return authInitializationPromise;
+  }
+
+  authInitializationPromise = (async () => {
+    authInitializationError = "";
+    isInitializingAuth = true;
     updateControls();
+    setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
+    appendConsoleLine("system", `Requested OAuth scope: ${audiotoolScope}`);
+
+    const redirectUrl = getRedirectUrl();
+    redirectUrlElement.textContent = redirectUrl;
+
+    try {
+      loginStatus = await getLoginStatus({
+        clientId: audiotoolClientId,
+        redirectUrl,
+        scope: audiotoolScope,
+      });
+
+      if (loginStatus.loggedIn) {
+        authInitializationError = "";
+        const userName = await loginStatus.getUserName();
+        setAudiotoolStatus(
+          `Logged in as ${toDisplayString(userName)}. Connect a project to start importing.`,
+          "ok",
+        );
+        await ensureClient();
+        await refreshMissingRequiredScopes();
+        if (missingRequiredScopes.length) {
+          setAudiotoolStatus(
+            `Logged in, but token is missing required scopes (${missingRequiredScopes.join(", ")}). Click Logout then Login.`,
+            "warn",
+          );
+        }
+        appendConsoleLine("system", "Audiotool client initialized.");
+
+        if (!canEmbedAudiotoolStudio) {
+          appendConsoleLine(
+            "system",
+            "Embedded preview is disabled on this host; use Open Project Tab for Studio.",
+          );
+        }
+      } else {
+        const errorText = loginStatus.error ? toDisplayString(loginStatus.error) : "";
+        if (errorText) {
+          authInitializationError = errorText;
+          setAudiotoolStatus(`Logged out: ${errorText}`, "error");
+        } else {
+          setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
+        }
+      }
+    } catch (error) {
+      const detail = toDisplayString(error);
+      authInitializationError = detail;
+      setAudiotoolStatus(`Auth setup failed: ${detail}`, "error");
+      appendConsoleLine("error", detail);
+      loginStatus = null;
+    } finally {
+      isInitializingAuth = false;
+      updateControls();
+    }
+  })();
+
+  try {
+    await authInitializationPromise;
+  } finally {
+    authInitializationPromise = null;
   }
 }
-
-editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, runCode);
 
 setProjectPreview("", "Log in and connect a project to show the Audiotool workspace here.");
 setImportMarker(0);
 updateTransportUi();
 setVideoStatus("No video selected yet. Start by choosing a local video file.", "warn");
-runCode();
+updateControls();
 initializeAudiotoolAuth();
 
 window.addEventListener("beforeunload", () => {
