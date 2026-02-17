@@ -24,7 +24,32 @@ Open: `http://127.0.0.1:5173/`
 
 ---
 
-## 2) Audiotool application setup
+## 2) Deploy to GitHub Pages
+
+This repo now includes:
+
+- `.github/workflows/deploy-gh-pages.yml`
+
+How deployment works:
+
+- On every push to `main`, GitHub Actions builds and deploys to Pages.
+- You can also run it manually with `workflow_dispatch`.
+- The workflow auto-computes the correct Vite base path:
+  - `"/"` for `<username>.github.io` repos
+  - `"/<repo-name>/"` for project pages repos
+
+One-time repository setup:
+
+1. In GitHub: **Settings -> Pages**
+2. Set **Source** to **GitHub Actions**
+
+For this repo (`TrumanOakes/CursorProjects`), the project Pages URL will usually be:
+
+- `https://trumanoakes.github.io/CursorProjects/`
+
+---
+
+## 3) Audiotool application setup
 
 This repo is preconfigured with your client ID:
 
@@ -34,6 +59,7 @@ Register/update your app on
 `https://developer.audiotool.com/applications` with:
 
 - Redirect URI (dev): `http://127.0.0.1:5173/`
+- Redirect URI (GitHub Pages): `https://trumanoakes.github.io/CursorProjects/`
 - Scope: `project:write`
 
 When you deploy, add your deployed URL as another redirect URI and make sure it
@@ -41,7 +67,7 @@ matches exactly (protocol, path, trailing slash).
 
 ---
 
-## 3) What the app does
+## 4) What the app does
 
 - Lets user login/logout with Audiotool (`getLoginStatus`)
 - Creates `AudiotoolClient` when logged in
@@ -90,7 +116,7 @@ accounts flow relies on same-site cookie behavior. Local development should use
 
 ---
 
-## 4) Secure execution model
+## 5) Secure execution model
 
 ### Trusted host (parent page)
 
@@ -106,7 +132,7 @@ accounts flow relies on same-site cookie behavior. Local development should use
 
 ---
 
-## 5) Operation payload format
+## 6) Operation payload format
 
 In editor code, call:
 
@@ -148,13 +174,13 @@ The transport panel provides:
 
 ---
 
-## 6) Keyboard shortcut
+## 7) Keyboard shortcut
 
 - Run iframe code: `Ctrl+Enter` (or `Cmd+Enter`)
 
 ---
 
-## 7) Project structure
+## 8) Project structure
 
 ```text
 .
@@ -168,7 +194,7 @@ The transport panel provides:
 
 ---
 
-## 8) Production hardening suggestions
+## 9) Production hardening suggestions
 
 - Restrict allowed operation/entity types more tightly
 - Add strict request quotas/rate limits in UI layer
