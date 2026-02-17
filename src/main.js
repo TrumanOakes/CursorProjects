@@ -989,17 +989,52 @@ async function placeSampleIntoProject({
 
   await activeDocument.modify((t) => {
     const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
-    const playbackFromExistingRegion = existingAudioRegions.find(
-      (region) => region.fields?.playbackAutomationCollection?.value,
-    )?.fields?.playbackAutomationCollection?.value;
-    const tempoAutomationTrack = t.entities.ofTypes("tempoAutomationTrack").getOne();
+    const automationEvents = t.entities.ofTypes("automationEvent").get();
+
+    const hasAnyAutomationEventForCollection = (location) =>
+      automationEvents.some((event) => event.fields.collection.value.equals(location));
+    const hasPositiveAutomationEventForCollection = (location) =>
+      automationEvents.some(
+        (event) =>
+          event.fields.collection.value.equals(location) &&
+          event.fields.value.value > 0.0001,
+      );
+
+    const regionReferences = existingAudioRegions
+      .map((region) => ({
+        name: region.fields?.region?.fields?.displayName?.value || "",
+        playbackLocation: region.fields?.playbackAutomationCollection?.value || null,
+      }))
+      .filter((entry) => entry.playbackLocation);
+
+    const pickPlaybackLocation = (references) =>
+      references.find((entry) =>
+        hasPositiveAutomationEventForCollection(entry.playbackLocation),
+      ) ||
+      references.find((entry) =>
+        hasAnyAutomationEventForCollection(entry.playbackLocation),
+      ) ||
+      null;
+
+    const nonImportedRegionPlayback = pickPlaybackLocation(
+      regionReferences.filter(
+        (entry) => !entry.name.startsWith(importedRegionNamePrefix),
+      ),
+    );
+    const importedRegionPlayback = pickPlaybackLocation(
+      regionReferences.filter((entry) =>
+        entry.name.startsWith(importedRegionNamePrefix),
+      ),
+    );
 
     let playbackAutomationLocation =
-      playbackFromExistingRegion || tempoAutomationTrack?.location || null;
-    if (playbackFromExistingRegion) {
-      playbackSource = "existing-audio-region";
-    } else if (tempoAutomationTrack?.location) {
-      playbackSource = "tempo-automation-track";
+      nonImportedRegionPlayback?.playbackLocation ||
+      importedRegionPlayback?.playbackLocation ||
+      null;
+    if (nonImportedRegionPlayback) {
+      playbackSource = "non-imported-audio-region";
+    } else if (importedRegionPlayback) {
+      playbackSource = "imported-audio-region";
     }
 
     if (replacePreviousImports) {
@@ -1050,18 +1085,31 @@ async function placeSampleIntoProject({
 
     const sampleEntity = t.create("sample", {
       sampleName,
-      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
+      uploadStartTime: 0n,
     });
-
-    if (!playbackAutomationLocation) {
-      const fallbackAutomationCollection = t.create("automationCollection", {});
-      playbackAutomationLocation = fallbackAutomationCollection.location;
-      playbackSource = "new-automation-collection";
-    }
 
     const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
     const regionPositionTicks = Math.max(0, secondsToTicksAtBpm(positionSeconds, bpm));
     const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
+
+    if (!playbackAutomationLocation) {
+      const fallbackAutomationCollection = t.create("automationCollection", {});
+      playbackAutomationLocation = fallbackAutomationCollection.location;
+      // An explicit "1x speed" curve avoids silent regions from empty collections.
+      t.create("automationEvent", {
+        collection: fallbackAutomationCollection.location,
+        positionTicks: 0,
+        value: 1,
+        interpolation: 1,
+      });
+      t.create("automationEvent", {
+        collection: fallbackAutomationCollection.location,
+        positionTicks: regionDurationTicks,
+        value: 1,
+        interpolation: 1,
+      });
+      playbackSource = "seeded-automation-collection";
+    }
 
     t.create("audioRegion", {
       track: track.location,
