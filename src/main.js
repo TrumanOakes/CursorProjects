@@ -1276,7 +1276,7 @@ async function uploadSelectedVideoAudioSample() {
     protobufDurationToSeconds(readySample?.playDuration) || selectedAudioBuffer.duration;
   lastUploadedSampleName = uploadResult.sampleName;
   lastUploadedSampleDurationSeconds = durationSeconds;
-  sampleNameInput.value = String(uploadResult.sampleName || "").replace(/^samples\//, "");
+  sampleNameInput.value = String(uploadResult.sampleName || "");
   appendConsoleLine(
     "system",
     `Sample uploaded as ${uploadResult.sampleName}. Timeline placement default set to ${sampleNameInput.value}.`,
@@ -1334,7 +1334,10 @@ async function placeChosenSampleAtMarker() {
 
   setVideoStatus("Resolving selected sample before timeline placement...", "warn");
   const resolved = await resolveSampleForPlacement(rawSampleName);
-  const documentSampleName = rawSampleName.trim();
+  const documentSampleName = String(resolved.sample?.name || resolved.sampleName || "").trim();
+  if (!documentSampleName) {
+    throw new Error("Resolved sample name is empty. Upload or choose a valid sample first.");
+  }
   appendConsoleLine(
     "system",
     `Resolved sample API name ${resolved.sampleName}; placing with document sample name ${documentSampleName}.`,
