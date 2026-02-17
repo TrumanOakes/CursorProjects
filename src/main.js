@@ -1,7 +1,7 @@
 import {
   createAudiotoolClient,
   getLoginStatus,
-} from "https://unpkg.com/@audiotool/nexus@0.0.11/dist/index.js?module";
+} from "./vendor/audiotool-nexus.browser.js";
 
 const audiotoolClientId = "7c3188d7-220f-4d34-92a6-608acc8ed4eb";
 const requiredAudiotoolScopes = ["project:write", "sample:write"];
