@@ -1,5 +1,7 @@
-import "./style.css";
-import { createAudiotoolClient, getLoginStatus } from "@audiotool/nexus";
+import {
+  createAudiotoolClient,
+  getLoginStatus,
+} from "https://esm.sh/@audiotool/nexus@0.0.11?bundle";
 
 const audiotoolClientId = "7c3188d7-220f-4d34-92a6-608acc8ed4eb";
 const requiredAudiotoolScopes = ["project:write", "sample:write"];
