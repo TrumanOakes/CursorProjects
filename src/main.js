@@ -951,11 +951,14 @@ async function placeSampleIntoProject({
     throw new Error("No connected project document available.");
   }
 
+  let usedTrackId = "";
+  let createdTrack = false;
+
   await activeDocument.modify((t) => {
     if (replacePreviousImports) {
       const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
       for (const region of existingAudioRegions) {
-        const regionName = region.region.fields.displayName.value || "";
+        const regionName = region.fields?.region?.fields?.displayName?.value || "";
         if (regionName.startsWith(importedRegionNamePrefix)) {
           t.remove(region);
         }
@@ -965,7 +968,17 @@ async function placeSampleIntoProject({
     const config = t.entities.ofTypes("config").getOne();
     const bpm = config ? config.fields.tempoBpm.value : 125;
 
-    let track = t.entities.ofTypes("audioTrack").getOne();
+    const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
+    const trackSortByOrder = (a, b) =>
+      a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
+    const enabledTracks = existingAudioTracks
+      .filter((currentTrack) => currentTrack.fields.isEnabled.value)
+      .sort(trackSortByOrder);
+
+    let track =
+      enabledTracks[0] ||
+      [...existingAudioTracks].sort(trackSortByOrder)[0] ||
+      undefined;
     if (!track) {
       const device = t.entities.ofTypes("audioDevice").getOne();
       if (!device) {
@@ -984,7 +997,10 @@ async function placeSampleIntoProject({
         player: device.location,
         orderAmongTracks: maxOrder + 1,
       });
+      createdTrack = true;
     }
+
+    usedTrackId = track.id;
 
     const sampleEntity = t.create("sample", {
       sampleName,
@@ -1000,6 +1016,7 @@ async function placeSampleIntoProject({
       track: track.location,
       playbackAutomationCollection: automationCollection.location,
       sample: sampleEntity.location,
+      gain: 1,
       fadeInDurationTicks: safeFadeTicks,
       fadeOutDurationTicks: safeFadeTicks,
       region: {
@@ -1010,6 +1027,11 @@ async function placeSampleIntoProject({
       },
     });
   });
+
+  appendConsoleLine(
+    "system",
+    `Placed imported audio region on track ${usedTrackId || "(unknown)"}${createdTrack ? " (new track created)" : ""}.`,
+  );
 }
 
 async function placeSampleIntoProjectWithRetry(args) {
