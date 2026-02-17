@@ -123,6 +123,17 @@ body {
   font-size: 0.9rem;
 }
 
+.pane input[type="text"] {
+  width: 100%;
+  border: 1px solid #334776;
+  background: #0a142b;
+  color: #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+
 .transport-panel {
   margin-top: 2px;
 }

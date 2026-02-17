@@ -39,7 +39,8 @@ after updating scopes so the new token includes sample permissions.
 2. Connect a project (Studio URL or UUID).
 3. Select a local video file.
 4. Set marker using the transport controls.
-5. Click **Import Video Audio at Marker**.
+5. Click **Upload Video Audio as Sample**.
+6. Click **Place Sample on Timeline at Marker** (uses the uploaded sample).
 
 Import pipeline:
 

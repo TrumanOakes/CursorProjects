@@ -16,6 +16,8 @@ const disconnectButton = document.getElementById("disconnect-btn");
 const openProjectButton = document.getElementById("open-project-btn");
 const reloadPreviewButton = document.getElementById("reload-preview-btn");
 const importAudioButton = document.getElementById("import-audio-btn");
+const placeSampleButton = document.getElementById("place-sample-btn");
+const sampleNameInput = document.getElementById("sample-name-input");
 const replaceImportedToggle = document.getElementById("replace-imported-toggle");
 
 const videoPlayPauseButton = document.getElementById("video-play-pause-btn");
@@ -45,13 +47,16 @@ let activeProjectStudioUrl = "";
 
 let isConnectingProject = false;
 let isInitializingAuth = false;
-let isImportingAudio = false;
+let isUploadingSample = false;
+let isPlacingSample = false;
 
 let selectedVideoFile = null;
 let selectedAudioBuffer = null;
 let selectedVideoObjectUrl = "";
 let importMarkerSeconds = 0;
 let missingRequiredScopes = [];
+let lastUploadedSampleName = "";
+let lastUploadedSampleDurationSeconds = 0;
 
 let audiotoolQueue = Promise.resolve();
 
@@ -479,6 +484,36 @@ function chooseDocumentSampleName(uploadedSampleName, existingSampleNames) {
   };
 }
 
+function protobufDurationToSeconds(playDuration) {
+  if (!playDuration) {
+    return 0;
+  }
+
+  const rawSeconds = playDuration.seconds;
+  const seconds =
+    typeof rawSeconds === "bigint"
+      ? Number(rawSeconds)
+      : typeof rawSeconds === "number"
+        ? rawSeconds
+        : typeof rawSeconds === "string"
+          ? Number(rawSeconds)
+          : 0;
+  const nanos = typeof playDuration.nanos === "number" ? playDuration.nanos : 0;
+  const total = seconds + nanos / 1e9;
+  return Number.isFinite(total) && total > 0 ? total : 0;
+}
+
+function buildSampleNameCandidates(rawSampleName) {
+  const trimmed = String(rawSampleName || "").trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const withPrefix = trimmed.startsWith("samples/") ? trimmed : `samples/${trimmed}`;
+  const withoutPrefix = trimmed.replace(/^samples\//, "");
+  return [...new Set([withPrefix, withoutPrefix].filter(Boolean))];
+}
+
 function getRedirectUrl() {
   const url = new URL(window.location.href);
   url.search = "";
@@ -658,6 +693,21 @@ function setProjectPreview(studioUrl, note = "") {
 
 function updateControls() {
   const loggedIn = Boolean(loginStatus && loginStatus.loggedIn);
+  const canUploadSample =
+    loggedIn &&
+    !isConnectingProject &&
+    !isUploadingSample &&
+    !isPlacingSample &&
+    !missingRequiredScopes.length &&
+    Boolean(selectedVideoFile && selectedAudioBuffer);
+  const hasSampleToPlace = Boolean(sampleNameInput.value.trim() || lastUploadedSampleName);
+  const canPlaceSample =
+    loggedIn &&
+    !isConnectingProject &&
+    !isUploadingSample &&
+    !isPlacingSample &&
+    Boolean(activeDocument) &&
+    hasSampleToPlace;
 
   authButton.disabled = isInitializingAuth;
   authButton.textContent = loggedIn ? "Logout" : "Login";
@@ -666,18 +716,21 @@ function updateControls() {
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
   reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
-  importAudioButton.disabled =
-    !selectedAudioBuffer ||
-    !selectedVideoFile ||
-    !activeDocument ||
-    Boolean(missingRequiredScopes.length) ||
-    isConnectingProject ||
-    isImportingAudio;
+  importAudioButton.disabled = !canUploadSample;
+  placeSampleButton.disabled = !canPlaceSample;
 
   if (missingRequiredScopes.length) {
     importAudioButton.title = `Missing OAuth scopes: ${missingRequiredScopes.join(", ")}`;
   } else {
     importAudioButton.removeAttribute("title");
+  }
+
+  if (!activeDocument) {
+    placeSampleButton.title = "Connect a project before placing samples.";
+  } else if (!hasSampleToPlace) {
+    placeSampleButton.title = "Upload a video sample first or enter sample name.";
+  } else {
+    placeSampleButton.removeAttribute("title");
   }
 }
 
@@ -1222,13 +1275,9 @@ async function placeSampleIntoProjectWithRetry(args) {
   }
 }
 
-async function importSelectedVideoAudio() {
+async function uploadSelectedVideoAudioSample() {
   if (!selectedVideoFile || !selectedAudioBuffer) {
-    throw new Error("Select a video file before importing audio.");
-  }
-
-  if (!activeDocument) {
-    throw new Error("Connect a project before importing audio.");
+    throw new Error("Select a video file before uploading audio.");
   }
 
   if (missingRequiredScopes.length) {
@@ -1260,21 +1309,86 @@ async function importSelectedVideoAudio() {
     );
   }
 
-  // Give backend caches/indexing a brief moment before timeline insertion.
-  await sleep(1200);
-  setVideoStatus("Placing sample region into project timeline...", "warn");
+  const durationSeconds =
+    protobufDurationToSeconds(readySample?.playDuration) || selectedAudioBuffer.duration;
+  lastUploadedSampleName = uploadResult.sampleName;
+  lastUploadedSampleDurationSeconds = durationSeconds;
+  sampleNameInput.value = uploadResult.sampleName;
+
+  return {
+    ...uploadResult,
+    importPositionSeconds,
+    durationSeconds,
+    replacePreviousImports,
+  };
+}
+
+async function resolveSampleForPlacement(rawSampleName) {
+  const candidates = buildSampleNameCandidates(rawSampleName);
+  if (!candidates.length) {
+    throw new Error("Sample name is required for timeline placement.");
+  }
+
+  let lastError = null;
+  for (const candidate of candidates) {
+    try {
+      appendConsoleLine("system", `Resolving sample for placement: ${candidate}`);
+      const resolvedSample = await waitForSampleReady(candidate, {
+        timeoutMs: 45000,
+        pollMs: 1200,
+      });
+      return { sampleName: candidate, sample: resolvedSample };
+    } catch (error) {
+      lastError = error;
+      appendConsoleLine(
+        "warn",
+        `Sample resolve attempt failed for ${candidate}: ${toDisplayString(error)}`,
+      );
+    }
+  }
+
+  throw new Error(
+    `Could not resolve sample "${rawSampleName}" for timeline placement: ${toDisplayString(lastError)}`,
+  );
+}
+
+async function placeChosenSampleAtMarker() {
+  if (!activeDocument) {
+    throw new Error("Connect a project before placing a sample on timeline.");
+  }
+
+  const rawSampleName = sampleNameInput.value.trim() || lastUploadedSampleName;
+  if (!rawSampleName) {
+    throw new Error("Upload a sample first or enter a sample name to place.");
+  }
+
+  const importPositionSeconds = clampVideoTime(importMarkerSeconds);
+  const replacePreviousImports = replaceImportedToggle.checked;
+
+  setVideoStatus("Resolving selected sample before timeline placement...", "warn");
+  const resolved = await resolveSampleForPlacement(rawSampleName);
+  const durationSeconds =
+    protobufDurationToSeconds(resolved.sample?.playDuration) ||
+    lastUploadedSampleDurationSeconds ||
+    selectedAudioBuffer?.duration ||
+    8;
+
+  await sleep(700);
+  setVideoStatus("Placing selected sample region into project timeline...", "warn");
   await placeSampleIntoProjectWithRetry({
-    sampleName: uploadResult.sampleName,
-    regionDisplayName: buildImportedRegionDisplayName(selectedVideoFile.name),
-    durationSeconds: selectedAudioBuffer.duration,
+    sampleName: resolved.sampleName,
+    regionDisplayName: buildImportedRegionDisplayName(
+      selectedVideoFile?.name || rawSampleName,
+    ),
+    durationSeconds,
     positionSeconds: importPositionSeconds,
     replacePreviousImports,
   });
 
   return {
-    ...uploadResult,
+    sampleName: resolved.sampleName,
     importPositionSeconds,
-    durationSeconds: selectedAudioBuffer.duration,
+    durationSeconds,
     replacePreviousImports,
   };
 }
@@ -1428,6 +1542,9 @@ videoFileInput.addEventListener("change", () => {
   if (!file) {
     selectedVideoFile = null;
     selectedAudioBuffer = null;
+    lastUploadedSampleName = "";
+    lastUploadedSampleDurationSeconds = 0;
+    sampleNameInput.value = "";
     revokeSelectedVideoUrl();
     localVideoPreview.removeAttribute("src");
     setImportMarker(0);
@@ -1440,6 +1557,9 @@ videoFileInput.addEventListener("change", () => {
   queueAudiotoolTask(async () => {
     selectedVideoFile = file;
     selectedAudioBuffer = null;
+    lastUploadedSampleName = "";
+    lastUploadedSampleDurationSeconds = 0;
+    sampleNameInput.value = "";
     revokeSelectedVideoUrl();
     selectedVideoObjectUrl = URL.createObjectURL(file);
     localVideoPreview.src = selectedVideoObjectUrl;
@@ -1492,46 +1612,84 @@ videoFileInput.addEventListener("change", () => {
   });
 });
 
+sampleNameInput.addEventListener("input", () => {
+  updateControls();
+});
+
 importAudioButton.addEventListener("click", () => {
   queueAudiotoolTask(async () => {
     await refreshMissingRequiredScopes();
     updateControls();
 
     if (!selectedVideoFile || !selectedAudioBuffer) {
-      setVideoStatus("Select a video file before importing audio.", "warn");
+      setVideoStatus("Select a video file before uploading audio as sample.", "warn");
       return;
     }
 
-    if (!activeDocument) {
-      setAudiotoolStatus("Connect a project before importing audio.", "warn");
-      return;
-    }
-
-    isImportingAudio = true;
+    isUploadingSample = true;
     updateControls();
 
     try {
-      const result = await importSelectedVideoAudio();
-      const modeText = result.replacePreviousImports
-        ? "replaced previous imported regions and imported"
-        : "imported";
+      const result = await uploadSelectedVideoAudioSample();
       const message =
-        `Successfully ${modeText} audio sample ${result.sampleName} at ${formatTimestamp(result.importPositionSeconds)} ` +
-        `for ${formatDuration(result.durationSeconds)} duration.`;
+        `Successfully uploaded audio sample ${result.sampleName} for ${formatDuration(result.durationSeconds)} duration. ` +
+        `Now click "Place Sample on Timeline at Marker".`;
 
       setVideoStatus(message, "ok");
       setAudiotoolStatus(
-        "Audio imported into project timeline. Open project tab to edit audio.",
+        "Sample upload complete. Place sample on timeline with the new button.",
         "ok",
       );
       appendConsoleLine("system", message);
     } catch (error) {
       const detail = toDisplayString(error);
-      setVideoStatus(`Audio import failed: ${detail}`, "error");
-      setAudiotoolStatus(`Audio import failed: ${detail}`, "error");
+      setVideoStatus(`Audio sample upload failed: ${detail}`, "error");
+      setAudiotoolStatus(`Audio sample upload failed: ${detail}`, "error");
       appendConsoleLine("error", detail);
     } finally {
-      isImportingAudio = false;
+      isUploadingSample = false;
+      updateControls();
+    }
+  });
+});
+
+placeSampleButton.addEventListener("click", () => {
+  queueAudiotoolTask(async () => {
+    if (!activeDocument) {
+      setAudiotoolStatus("Connect a project before placing sample on timeline.", "warn");
+      return;
+    }
+
+    const rawSampleName = sampleNameInput.value.trim() || lastUploadedSampleName;
+    if (!rawSampleName) {
+      setVideoStatus("Upload a sample first or enter a sample name to place.", "warn");
+      return;
+    }
+
+    isPlacingSample = true;
+    updateControls();
+
+    try {
+      const result = await placeChosenSampleAtMarker();
+      const modeText = result.replacePreviousImports
+        ? "replaced previous imported regions and placed"
+        : "placed";
+      const message =
+        `Successfully ${modeText} sample ${result.sampleName} at ${formatTimestamp(result.importPositionSeconds)} ` +
+        `for ${formatDuration(result.durationSeconds)} duration.`;
+      setVideoStatus(message, "ok");
+      setAudiotoolStatus(
+        "Sample region placed on project timeline. Open project tab to verify waveform.",
+        "ok",
+      );
+      appendConsoleLine("system", message);
+    } catch (error) {
+      const detail = toDisplayString(error);
+      setVideoStatus(`Placing sample on timeline failed: ${detail}`, "error");
+      setAudiotoolStatus(`Placing sample on timeline failed: ${detail}`, "error");
+      appendConsoleLine("error", detail);
+    } finally {
+      isPlacingSample = false;
       updateControls();
     }
   });

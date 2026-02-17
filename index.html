@@ -87,9 +87,19 @@
           </section>
           <div class="buttons preview-buttons">
             <button id="import-audio-btn" type="button" disabled>
-              Import Video Audio at Marker
+              Upload Video Audio as Sample
+            </button>
+            <button id="place-sample-btn" type="button" disabled>
+              Place Sample on Timeline at Marker
             </button>
           </div>
+          <label for="sample-name-input">Sample name to place</label>
+          <input
+            id="sample-name-input"
+            name="sample-name-input"
+            type="text"
+            placeholder="samples/<uuid> (auto-filled after upload)"
+          />
           <label class="inline-checkbox">
             <input id="replace-imported-toggle" type="checkbox" checked />
             Replace previously imported video audio regions
