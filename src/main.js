@@ -1049,6 +1049,19 @@ async function placeSampleIntoProject({
       .filter((currentTrack) => currentTrack.fields.isEnabled.value)
       .sort(trackSortByOrder);
 
+    const nonImportedAudioRegions = existingAudioRegions.filter(
+      (region) =>
+        !(region.fields?.region?.fields?.displayName?.value || "").startsWith(
+          importedRegionNamePrefix,
+        ),
+    );
+    const preferredTrackIds = new Set(
+      nonImportedAudioRegions.map((region) => region.fields.track.value.entityId),
+    );
+    const enabledPreferredTracks = enabledTracks.filter((currentTrack) =>
+      preferredTrackIds.has(currentTrack.id),
+    );
+
     const previousImportedTrackId =
       replacePreviousImports && previousImportedRegions.length
         ? previousImportedRegions[0].fields.track.value.entityId
@@ -1058,6 +1071,7 @@ async function placeSampleIntoProject({
       : undefined;
 
     let track =
+      enabledPreferredTracks[0] ||
       previousImportedTrack ||
       enabledTracks[0] ||
       [...existingAudioTracks].sort(trackSortByOrder)[0] ||
@@ -1084,6 +1098,13 @@ async function placeSampleIntoProject({
     }
 
     usedTrackId = track.id;
+    let trackSelectionReason = enabledPreferredTracks[0]
+      ? "enabled-track-with-existing-audio"
+      : previousImportedTrack
+        ? "previous-imported-track"
+        : enabledTracks[0]
+          ? "first-enabled-audio-track"
+          : "first-audio-track";
 
     const sampleEntity = t.create("sample", {
       sampleName: sampleNameForDocument,
@@ -1127,6 +1148,20 @@ async function placeSampleIntoProject({
         displayName: regionDisplayName,
       },
     });
+
+    if (!track.fields.isEnabled.value) {
+      t.update(track.fields.isEnabled, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-track-enabled`;
+    }
+    const trackPlayer = track.fields.player.value;
+    const audioDevice = trackPlayer?.entityId
+      ? t.entities.ofTypes("audioDevice").getEntity(trackPlayer.entityId)
+      : undefined;
+    if (audioDevice && !audioDevice.fields.isActive.value) {
+      t.update(audioDevice.fields.isActive, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-device-active`;
+    }
+    playbackSource = `${playbackSource},track=${trackSelectionReason}`;
   });
 
   appendConsoleLine(
