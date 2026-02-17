@@ -58,6 +58,7 @@ let selectedVideoObjectUrl = "";
 let importMarkerSeconds = 0;
 let missingRequiredScopes = [];
 let lastUploadedSampleName = "";
+let lastUploadedSampleDisplayName = "";
 let lastUploadedSampleDurationSeconds = 0;
 let authInitializationError = "";
 let authInitializationPromise = null;
@@ -463,6 +464,31 @@ function buildImportedRegionDisplayName(fileName) {
   return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
 }
 
+function chooseDocumentSampleName(uploadedSampleName, existingSampleNames) {
+  const prefixedCount = existingSampleNames.filter((name) =>
+    String(name).startsWith("samples/"),
+  ).length;
+  const unprefixedCount = existingSampleNames.filter(
+    (name) => name && !String(name).startsWith("samples/"),
+  ).length;
+
+  const uploaded = String(uploadedSampleName || "");
+  const stripped = uploaded.replace(/^samples\//, "");
+
+  // Some projects appear to use unprefixed sample names internally.
+  if (unprefixedCount > prefixedCount && stripped) {
+    return {
+      sampleNameForDocument: stripped,
+      reason: `existing samples favor unprefixed format (${unprefixedCount} vs ${prefixedCount})`,
+    };
+  }
+
+  return {
+    sampleNameForDocument: uploaded,
+    reason: `existing samples favor prefixed format (${prefixedCount} vs ${unprefixedCount})`,
+  };
+}
+
 function protobufDurationToSeconds(playDuration) {
   if (!playDuration) {
     return 0;
@@ -491,6 +517,63 @@ function buildSampleNameCandidates(rawSampleName) {
   const withPrefix = trimmed.startsWith("samples/") ? trimmed : `samples/${trimmed}`;
   const withoutPrefix = trimmed.replace(/^samples\//, "");
   return [...new Set([withPrefix, withoutPrefix].filter(Boolean))];
+}
+
+function escapeCelStringLiteral(value) {
+  return String(value || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+async function resolveOwnedSampleNameByDisplayName(displayName) {
+  const wantedDisplayName = String(displayName || "").trim();
+  if (!wantedDisplayName) {
+    return "";
+  }
+
+  const client = await ensureClient();
+  const filters = [];
+
+  try {
+    const authedUserName = await loginStatus?.getUserName?.();
+    if (!(authedUserName instanceof Error)) {
+      const user = String(authedUserName || "").trim();
+      if (user) {
+        const owner = user.startsWith("users/") ? user : `users/${user}`;
+        filters.push(
+          `sample.owner_name == "${escapeCelStringLiteral(owner)}" && sample.display_name == "${escapeCelStringLiteral(wantedDisplayName)}"`,
+        );
+      }
+    }
+  } catch {
+    // Ignore owner-filter lookup errors and try broader search.
+  }
+
+  filters.push(`sample.display_name == "${escapeCelStringLiteral(wantedDisplayName)}"`);
+
+  for (const filter of filters) {
+    const listResult = await client.api.sampleService.listSamples({
+      pageSize: 50,
+      filter,
+      orderBy: "sample.create_time desc",
+    });
+    if (isErrorResult(listResult)) {
+      appendConsoleLine(
+        "warn",
+        `ListSamples lookup failed for display name "${wantedDisplayName}": ${formatApiErrorDetail(listResult)}`,
+      );
+      continue;
+    }
+
+    const matching = (listResult.samples || []).find(
+      (sample) =>
+        String(sample.displayName || "").trim().toLowerCase() ===
+          wantedDisplayName.toLowerCase() && sample.name,
+    );
+    if (matching?.name) {
+      return matching.name;
+    }
+  }
+
+  return "";
 }
 
 function getRedirectUrl() {
@@ -861,6 +944,7 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
   ];
 
   let createResult = null;
+  let createResultLabel = "";
   let lastCreateDetail = "CreateSample failed for unknown reason.";
   for (let index = 0; index < sampleCandidates.length; index += 1) {
     const candidate = sampleCandidates[index];
@@ -873,6 +957,7 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
       const result = await client.api.sampleService.createSample(candidate);
       if (!isErrorResult(result)) {
         createResult = result;
+        createResultLabel = candidate.label;
         break;
       }
 
@@ -940,6 +1025,65 @@ async function uploadAudioAsSample(fileName, audioBuffer) {
   });
   if (isErrorResult(finishedResult)) {
     throw new Error(`UploadSampleFinished failed: ${formatApiErrorDetail(finishedResult)}`);
+  }
+
+  // Preserve a human-readable sample name even if fallback payloads were needed.
+  if (sampleDisplayName) {
+    const updateCandidates = [
+      {
+        label: "no-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+        },
+      },
+      {
+        label: "snake-case-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+          updateMask: {
+            paths: ["display_name"],
+          },
+        },
+      },
+      {
+        label: "camel-case-update-mask",
+        payload: {
+          sample: {
+            name: sampleName,
+            displayName: sampleDisplayName,
+          },
+          updateMask: {
+            paths: ["displayName"],
+          },
+        },
+      },
+    ];
+
+    for (let index = 0; index < updateCandidates.length; index += 1) {
+      const candidate = updateCandidates[index];
+      const updateResult = await client.api.sampleService.updateSample(candidate.payload);
+      if (!isErrorResult(updateResult)) {
+        if (createResultLabel === "empty-sample") {
+          appendConsoleLine(
+            "system",
+            `Recovered sample display name to "${sampleDisplayName}" after empty-sample create fallback.`,
+          );
+        }
+        break;
+      }
+      if (index === updateCandidates.length - 1) {
+        appendConsoleLine(
+          "warn",
+          `Could not enforce sample display name "${sampleDisplayName}": ${formatApiErrorDetail(updateResult)}`,
+        );
+      }
+    }
   }
 
   return {
@@ -1064,6 +1208,9 @@ async function placeSampleIntoProject({
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
     const sampleEntities = t.entities.ofTypes("sample").get();
     const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
+    const existingSampleNames = sampleEntities
+      .map((sampleEntity) => sampleEntity.fields.sampleName.value)
+      .filter(Boolean);
 
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
@@ -1137,10 +1284,26 @@ async function placeSampleIntoProject({
       ? sampleById.get(referenceRegionOnTrack.fields.sample.value.entityId)?.fields
           .sampleName.value || ""
       : "";
-    const sampleNameForDocument = String(sampleName || "").trim();
-    const sampleNameChoiceReason = referenceSampleNameOnTrack
-      ? `manual/selected sample naming (reference on track: ${referenceSampleNameOnTrack})`
-      : "manual/selected sample naming";
+    const uploadedSampleName = String(sampleName || "");
+    const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
+
+    let sampleNameForDocument = uploadedSampleName;
+    let sampleNameChoiceReason = "default uploaded sample name";
+
+    if (referenceSampleNameOnTrack) {
+      const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
+      sampleNameForDocument = referenceUsesPrefix
+        ? uploadedSampleName
+        : strippedUploadedSampleName;
+      sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
+    } else {
+      const fallbackChoice = chooseDocumentSampleName(
+        uploadedSampleName,
+        existingSampleNames,
+      );
+      sampleNameForDocument = fallbackChoice.sampleNameForDocument;
+      sampleNameChoiceReason = fallbackChoice.reason;
+    }
     appendConsoleLine(
       "system",
       `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
@@ -1275,11 +1438,12 @@ async function uploadSelectedVideoAudioSample() {
   const durationSeconds =
     protobufDurationToSeconds(readySample?.playDuration) || selectedAudioBuffer.duration;
   lastUploadedSampleName = uploadResult.sampleName;
+  lastUploadedSampleDisplayName = String(uploadResult.sampleDisplayName || "").trim();
   lastUploadedSampleDurationSeconds = durationSeconds;
-  sampleNameInput.value = String(uploadResult.sampleName || "");
+  sampleNameInput.value = lastUploadedSampleDisplayName || String(uploadResult.sampleName || "");
   appendConsoleLine(
     "system",
-    `Sample uploaded as ${uploadResult.sampleName}. Timeline placement default set to ${sampleNameInput.value}.`,
+    `Sample uploaded as ${uploadResult.sampleName} (display "${lastUploadedSampleDisplayName || uploadResult.sampleName}"). Timeline placement default set to ${sampleNameInput.value}.`,
   );
 
   return {
@@ -1291,31 +1455,62 @@ async function uploadSelectedVideoAudioSample() {
 }
 
 async function resolveSampleForPlacement(rawSampleName) {
-  const candidates = buildSampleNameCandidates(rawSampleName);
-  if (!candidates.length) {
+  const trimmedInput = String(rawSampleName || "").trim();
+  const candidates = buildSampleNameCandidates(trimmedInput);
+  if (!trimmedInput || !candidates.length) {
     throw new Error("Sample name is required for timeline placement.");
   }
 
+  const attemptedCandidates = new Set();
   let lastError = null;
-  for (const candidate of candidates) {
-    try {
-      appendConsoleLine("system", `Resolving sample for placement: ${candidate}`);
-      const resolvedSample = await waitForSampleReady(candidate, {
-        timeoutMs: 45000,
-        pollMs: 1200,
-      });
-      return { sampleName: candidate, sample: resolvedSample };
-    } catch (error) {
-      lastError = error;
-      appendConsoleLine(
-        "warn",
-        `Sample resolve attempt failed for ${candidate}: ${toDisplayString(error)}`,
-      );
+
+  const tryResolveCandidates = async (candidateList, sourceLabel) => {
+    for (const candidate of candidateList) {
+      const normalizedCandidate = String(candidate || "").trim();
+      if (!normalizedCandidate || attemptedCandidates.has(normalizedCandidate)) {
+        continue;
+      }
+      attemptedCandidates.add(normalizedCandidate);
+      try {
+        appendConsoleLine("system", `Resolving sample for placement (${sourceLabel}): ${normalizedCandidate}`);
+        const resolvedSample = await waitForSampleReady(normalizedCandidate, {
+          timeoutMs: 45000,
+          pollMs: 1200,
+        });
+        return { sampleName: normalizedCandidate, sample: resolvedSample };
+      } catch (error) {
+        lastError = error;
+        appendConsoleLine(
+          "warn",
+          `Sample resolve attempt failed for ${normalizedCandidate}: ${toDisplayString(error)}`,
+        );
+      }
+    }
+    return null;
+  };
+
+  const directResolved = await tryResolveCandidates(candidates, "direct-name");
+  if (directResolved) {
+    return directResolved;
+  }
+
+  const displayNameResolvedSample = await resolveOwnedSampleNameByDisplayName(trimmedInput);
+  if (displayNameResolvedSample) {
+    appendConsoleLine(
+      "system",
+      `Resolved display name "${trimmedInput}" to sample id ${displayNameResolvedSample}.`,
+    );
+    const resolvedByDisplayName = await tryResolveCandidates(
+      buildSampleNameCandidates(displayNameResolvedSample),
+      "display-name",
+    );
+    if (resolvedByDisplayName) {
+      return resolvedByDisplayName;
     }
   }
 
   throw new Error(
-    `Could not resolve sample "${rawSampleName}" for timeline placement: ${toDisplayString(lastError)}`,
+    `Could not resolve sample "${trimmedInput}" for timeline placement: ${toDisplayString(lastError)}`,
   );
 }
 
@@ -1324,8 +1519,12 @@ async function placeChosenSampleAtMarker() {
     throw new Error("Connect a project before placing a sample on timeline.");
   }
 
-  const rawSampleName = sampleNameInput.value.trim() || lastUploadedSampleName;
-  if (!rawSampleName) {
+  const rawSampleInput = sampleNameInput.value.trim();
+  const sampleReference =
+    rawSampleInput && rawSampleInput !== lastUploadedSampleDisplayName
+      ? rawSampleInput
+      : lastUploadedSampleName || rawSampleInput;
+  if (!sampleReference) {
     throw new Error("Upload a sample first or enter a sample name to place.");
   }
 
@@ -1333,14 +1532,19 @@ async function placeChosenSampleAtMarker() {
   const replacePreviousImports = replaceImportedToggle.checked;
 
   setVideoStatus("Resolving selected sample before timeline placement...", "warn");
-  const resolved = await resolveSampleForPlacement(rawSampleName);
+  const resolved = await resolveSampleForPlacement(sampleReference);
   const documentSampleName = String(resolved.sample?.name || resolved.sampleName || "").trim();
   if (!documentSampleName) {
     throw new Error("Resolved sample name is empty. Upload or choose a valid sample first.");
   }
+  const displayNameForUi =
+    String(resolved.sample?.displayName || "").trim() ||
+    rawSampleInput ||
+    lastUploadedSampleDisplayName ||
+    documentSampleName;
   appendConsoleLine(
     "system",
-    `Resolved sample API name ${resolved.sampleName}; placing with document sample name ${documentSampleName}.`,
+    `Resolved sample API name ${resolved.sampleName} (display "${displayNameForUi}"); placing with document sample name ${documentSampleName}.`,
   );
   const durationSeconds =
     protobufDurationToSeconds(resolved.sample?.playDuration) ||
@@ -1353,7 +1557,7 @@ async function placeChosenSampleAtMarker() {
   await placeSampleIntoProjectWithRetry({
     sampleName: documentSampleName,
     regionDisplayName: buildImportedRegionDisplayName(
-      selectedVideoFile?.name || rawSampleName,
+      selectedVideoFile?.name || displayNameForUi,
     ),
     durationSeconds,
     positionSeconds: importPositionSeconds,
@@ -1362,6 +1566,7 @@ async function placeChosenSampleAtMarker() {
 
   return {
     sampleName: documentSampleName,
+    sampleDisplayName: displayNameForUi,
     resolvedApiSampleName: resolved.sampleName,
     importPositionSeconds,
     durationSeconds,
@@ -1538,6 +1743,7 @@ videoFileInput.addEventListener("change", () => {
     selectedVideoFile = null;
     selectedAudioBuffer = null;
     lastUploadedSampleName = "";
+    lastUploadedSampleDisplayName = "";
     lastUploadedSampleDurationSeconds = 0;
     sampleNameInput.value = "";
     revokeSelectedVideoUrl();
@@ -1553,6 +1759,7 @@ videoFileInput.addEventListener("change", () => {
     selectedVideoFile = file;
     selectedAudioBuffer = null;
     lastUploadedSampleName = "";
+    lastUploadedSampleDisplayName = "";
     lastUploadedSampleDurationSeconds = 0;
     sampleNameInput.value = "";
     revokeSelectedVideoUrl();
@@ -1626,8 +1833,9 @@ importAudioButton.addEventListener("click", () => {
 
     try {
       const result = await uploadSelectedVideoAudioSample();
+      const uploadedLabel = result.sampleDisplayName || result.sampleName;
       const message =
-        `Successfully uploaded audio sample ${result.sampleName} for ${formatDuration(result.durationSeconds)} duration. ` +
+        `Successfully uploaded audio sample "${uploadedLabel}" for ${formatDuration(result.durationSeconds)} duration. ` +
         `Now click "Place Sample on Timeline at Marker".`;
 
       setVideoStatus(message, "ok");
@@ -1669,8 +1877,9 @@ placeSampleButton.addEventListener("click", () => {
       const modeText = result.replacePreviousImports
         ? "replaced previous imported regions and placed"
         : "placed";
+      const placedLabel = result.sampleDisplayName || result.sampleName;
       const message =
-        `Successfully ${modeText} sample ${result.sampleName} at ${formatTimestamp(result.importPositionSeconds)} ` +
+        `Successfully ${modeText} sample "${placedLabel}" at ${formatTimestamp(result.importPositionSeconds)} ` +
         `for ${formatDuration(result.durationSeconds)} duration.`;
       if (result.resolvedApiSampleName && result.resolvedApiSampleName !== result.sampleName) {
         appendConsoleLine(
