@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - cursor/audio-import-issue-9a7e
   workflow_dispatch:
 
 permissions:

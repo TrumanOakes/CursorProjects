@@ -28,6 +28,9 @@ This repo includes a Pages workflow at:
 2. Set **Source** to **GitHub Actions**.
 3. Push to `main` (or run the workflow manually from Actions tab).
 
+For this feature branch, pushes to `cursor/audio-import-issue-9a7e` also trigger
+the Pages deploy workflow so you can test branch updates without merging first.
+
 ### OAuth redirect setup for deployed site
 
 For a project page deployment, your app URL is:

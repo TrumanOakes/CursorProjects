@@ -46,7 +46,7 @@ let activeProject = "";
 let activeProjectStudioUrl = "";
 
 let isConnectingProject = false;
-let isInitializingAuth = false;
+let isInitializingAuth = true;
 let isUploadingSample = false;
 let isPlacingSample = false;
 
@@ -58,6 +58,7 @@ let missingRequiredScopes = [];
 let lastUploadedSampleName = "";
 let lastUploadedSampleDurationSeconds = 0;
 let authInitializationError = "";
+let authInitializationPromise = null;
 
 let audiotoolQueue = Promise.resolve();
 
@@ -1382,6 +1383,11 @@ projectInput.addEventListener("input", () => {
 });
 
 authButton.addEventListener("click", async () => {
+  if (isInitializingAuth) {
+    setAudiotoolStatus("Authentication is still initializing, please wait...", "warn");
+    return;
+  }
+
   if (!loginStatus) {
     setAudiotoolStatus(
       authInitializationError
@@ -1389,7 +1395,7 @@ authButton.addEventListener("click", async () => {
         : "Auth status not ready yet. Reinitializing auth...",
       "warn",
     );
-    await initializeAudiotoolAuth();
+    await initializeAudiotoolAuth(true);
     if (!loginStatus) {
       setAudiotoolStatus(
         authInitializationError
@@ -1685,64 +1691,76 @@ placeSampleButton.addEventListener("click", () => {
   });
 });
 
-async function initializeAudiotoolAuth() {
-  authInitializationError = "";
-  isInitializingAuth = true;
-  updateControls();
-  setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
-  appendConsoleLine("system", `Requested OAuth scope: ${audiotoolScope}`);
+async function initializeAudiotoolAuth(force = false) {
+  if (authInitializationPromise && !force) {
+    return authInitializationPromise;
+  }
 
-  const redirectUrl = getRedirectUrl();
-  redirectUrlElement.textContent = redirectUrl;
+  authInitializationPromise = (async () => {
+    authInitializationError = "";
+    isInitializingAuth = true;
+    updateControls();
+    setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
+    appendConsoleLine("system", `Requested OAuth scope: ${audiotoolScope}`);
+
+    const redirectUrl = getRedirectUrl();
+    redirectUrlElement.textContent = redirectUrl;
+
+    try {
+      loginStatus = await getLoginStatus({
+        clientId: audiotoolClientId,
+        redirectUrl,
+        scope: audiotoolScope,
+      });
+
+      if (loginStatus.loggedIn) {
+        authInitializationError = "";
+        const userName = await loginStatus.getUserName();
+        setAudiotoolStatus(
+          `Logged in as ${toDisplayString(userName)}. Connect a project to start importing.`,
+          "ok",
+        );
+        await ensureClient();
+        await refreshMissingRequiredScopes();
+        if (missingRequiredScopes.length) {
+          setAudiotoolStatus(
+            `Logged in, but token is missing required scopes (${missingRequiredScopes.join(", ")}). Click Logout then Login.`,
+            "warn",
+          );
+        }
+        appendConsoleLine("system", "Audiotool client initialized.");
+
+        if (!canEmbedAudiotoolStudio) {
+          appendConsoleLine(
+            "system",
+            "Embedded preview is disabled on this host; use Open Project Tab for Studio.",
+          );
+        }
+      } else {
+        const errorText = loginStatus.error ? toDisplayString(loginStatus.error) : "";
+        if (errorText) {
+          authInitializationError = errorText;
+          setAudiotoolStatus(`Logged out: ${errorText}`, "error");
+        } else {
+          setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
+        }
+      }
+    } catch (error) {
+      const detail = toDisplayString(error);
+      authInitializationError = detail;
+      setAudiotoolStatus(`Auth setup failed: ${detail}`, "error");
+      appendConsoleLine("error", detail);
+      loginStatus = null;
+    } finally {
+      isInitializingAuth = false;
+      updateControls();
+    }
+  })();
 
   try {
-    loginStatus = await getLoginStatus({
-      clientId: audiotoolClientId,
-      redirectUrl,
-      scope: audiotoolScope,
-    });
-
-    if (loginStatus.loggedIn) {
-      authInitializationError = "";
-      const userName = await loginStatus.getUserName();
-      setAudiotoolStatus(
-        `Logged in as ${toDisplayString(userName)}. Connect a project to start importing.`,
-        "ok",
-      );
-      await ensureClient();
-      await refreshMissingRequiredScopes();
-      if (missingRequiredScopes.length) {
-        setAudiotoolStatus(
-          `Logged in, but token is missing required scopes (${missingRequiredScopes.join(", ")}). Click Logout then Login.`,
-          "warn",
-        );
-      }
-      appendConsoleLine("system", "Audiotool client initialized.");
-
-      if (!canEmbedAudiotoolStudio) {
-        appendConsoleLine(
-          "system",
-          "Embedded preview is disabled on this host; use Open Project Tab for Studio.",
-        );
-      }
-    } else {
-      const errorText = loginStatus.error ? toDisplayString(loginStatus.error) : "";
-      if (errorText) {
-        authInitializationError = errorText;
-        setAudiotoolStatus(`Logged out: ${errorText}`, "error");
-      } else {
-        setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
-      }
-    }
-  } catch (error) {
-    const detail = toDisplayString(error);
-    authInitializationError = detail;
-    setAudiotoolStatus(`Auth setup failed: ${detail}`, "error");
-    appendConsoleLine("error", detail);
-    loginStatus = null;
+    await authInitializationPromise;
   } finally {
-    isInitializingAuth = false;
-    updateControls();
+    authInitializationPromise = null;
   }
 }
 
