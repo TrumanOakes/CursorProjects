@@ -483,6 +483,27 @@ function protobufDurationToSeconds(playDuration) {
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
 
+function protobufTimestampToUnixSeconds(timestamp) {
+  if (!timestamp) {
+    return 0;
+  }
+
+  const rawSeconds = timestamp.seconds;
+  const seconds =
+    typeof rawSeconds === "bigint"
+      ? Number(rawSeconds)
+      : typeof rawSeconds === "number"
+        ? rawSeconds
+        : typeof rawSeconds === "string"
+          ? Number(rawSeconds)
+          : 0;
+
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return 0;
+  }
+  return Math.floor(seconds);
+}
+
 function buildSampleNameCandidates(rawSampleName) {
   const trimmed = String(rawSampleName || "").trim();
   if (!trimmed) {
@@ -1150,6 +1171,7 @@ function isLikelySampleNotReadyError(error) {
 
 async function placeSampleIntoProject({
   sampleName,
+  sampleUploadStartTimeSeconds,
   regionDisplayName,
   durationSeconds,
   positionSeconds,
@@ -1256,6 +1278,22 @@ async function placeSampleIntoProject({
       ? sampleById.get(referenceRegionOnTrack.fields.sample.value.entityId)?.fields
           .sampleName.value || ""
       : "";
+    const referencePlaybackCollectionId = referenceRegionOnTrack?.fields
+      ?.playbackAutomationCollection?.value?.entityId
+      ? String(referenceRegionOnTrack.fields.playbackAutomationCollection.value.entityId)
+      : "";
+    const referencePlaybackEvents = referencePlaybackCollectionId
+      ? t.entities
+          .ofTypes("automationEvent")
+          .get()
+          .filter(
+            (event) =>
+              event.fields.collection.value.entityId === referencePlaybackCollectionId,
+          )
+          .sort(
+            (a, b) => a.fields.positionTicks.value - b.fields.positionTicks.value,
+          )
+      : [];
     const uploadedSampleName = String(sampleName || "");
     const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
 
@@ -1277,10 +1315,22 @@ async function placeSampleIntoProject({
       throw new Error("Sample name for document placement is empty.");
     }
 
+    const normalizedUploadStartTimeSeconds = Math.max(
+      0,
+      Math.floor(
+        Number.isFinite(sampleUploadStartTimeSeconds)
+          ? sampleUploadStartTimeSeconds
+          : Date.now() / 1000,
+      ),
+    );
+    appendConsoleLine(
+      "system",
+      `Sample entity uploadStartTime set to ${normalizedUploadStartTimeSeconds} (unix seconds).`,
+    );
+
     const sampleEntity = t.create("sample", {
       sampleName: sampleNameForDocument,
-      // Sample is already resolved/ready before placement.
-      uploadStartTime: BigInt(0),
+      uploadStartTime: BigInt(normalizedUploadStartTimeSeconds),
     });
 
     const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
@@ -1288,7 +1338,22 @@ async function placeSampleIntoProject({
     const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
 
     const playbackAutomationCollection = t.create("automationCollection", {});
-    // Always seed a stable 1x playback curve for imported regions.
+    const referencePlaybackValue = referencePlaybackEvents.length
+      ? referencePlaybackEvents[0].fields.value.value
+      : 0.5;
+    const playbackValue = Math.min(1, Math.max(0, referencePlaybackValue));
+    const referenceInterpolation = referencePlaybackEvents.length
+      ? referencePlaybackEvents[0].fields.interpolation.value
+      : 1;
+    const playbackInterpolation = [1, 2].includes(referenceInterpolation)
+      ? referenceInterpolation
+      : 1;
+    appendConsoleLine(
+      "system",
+      `Playback automation seeded from ${referencePlaybackEvents.length ? "track reference" : "default"} value=${playbackValue.toFixed(3)} interpolation=${playbackInterpolation}.`,
+    );
+
+    // Seed a stable playback curve for imported regions.
     const usedPositions = new Set();
     const addPlaybackEvent = (positionTicks, value) => {
       const safePosition =
@@ -1300,11 +1365,11 @@ async function placeSampleIntoProject({
         collection: playbackAutomationCollection.location,
         positionTicks: safePosition,
         value,
-        interpolation: 1,
+        interpolation: playbackInterpolation,
       });
     };
-    addPlaybackEvent(0, 1);
-    addPlaybackEvent(regionDurationTicks, 1);
+    addPlaybackEvent(0, playbackValue);
+    addPlaybackEvent(regionDurationTicks, playbackValue);
 
     t.create("audioRegion", {
       track: track.location,
@@ -1313,8 +1378,8 @@ async function placeSampleIntoProject({
       gain: 1,
       fadeInDurationTicks: safeFadeTicks,
       fadeOutDurationTicks: safeFadeTicks,
-      // 1 = pitch-shift mode (faster/slower playback, valid non-zero mode).
-      timestretchMode: 1,
+      // 2 = time stretch mode (preserve pitch), DAW default.
+      timestretchMode: 2,
       region: {
         positionTicks: regionPositionTicks,
         durationTicks: regionDurationTicks,
@@ -1519,11 +1584,15 @@ async function placeChosenSampleAtMarker() {
     lastUploadedSampleDurationSeconds ||
     selectedAudioBuffer?.duration ||
     8;
+  const sampleUploadStartTimeSeconds =
+    protobufTimestampToUnixSeconds(resolved.sample?.createTime) ||
+    Math.floor(Date.now() / 1000);
 
   await sleep(700);
   setVideoStatus("Placing selected sample region into project timeline...", "warn");
   await placeSampleIntoProjectWithRetry({
     sampleName: documentSampleName,
+    sampleUploadStartTimeSeconds,
     regionDisplayName: buildImportedRegionDisplayName(
       selectedVideoFile?.name || displayNameForUi,
     ),
