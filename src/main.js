@@ -483,27 +483,6 @@ function protobufDurationToSeconds(playDuration) {
   return Number.isFinite(total) && total > 0 ? total : 0;
 }
 
-function protobufTimestampToUnixSeconds(timestamp) {
-  if (!timestamp) {
-    return 0;
-  }
-
-  const rawSeconds = timestamp.seconds;
-  const seconds =
-    typeof rawSeconds === "bigint"
-      ? Number(rawSeconds)
-      : typeof rawSeconds === "number"
-        ? rawSeconds
-        : typeof rawSeconds === "string"
-          ? Number(rawSeconds)
-          : 0;
-
-  if (!Number.isFinite(seconds) || seconds <= 0) {
-    return 0;
-  }
-  return Math.floor(seconds);
-}
-
 function buildSampleNameCandidates(rawSampleName) {
   const trimmed = String(rawSampleName || "").trim();
   if (!trimmed) {
@@ -1171,7 +1150,6 @@ function isLikelySampleNotReadyError(error) {
 
 async function placeSampleIntoProject({
   sampleName,
-  sampleUploadStartTimeSeconds,
   regionDisplayName,
   durationSeconds,
   positionSeconds,
@@ -1188,12 +1166,22 @@ async function placeSampleIntoProject({
   await activeDocument.modify((t) => {
     const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
     const previousImportedRegions = [];
+    const removedImportedSampleIds = new Set();
+    const removedImportedPlaybackCollectionIds = new Set();
 
     if (replacePreviousImports) {
       for (const region of existingAudioRegions) {
         const regionName = region.fields?.region?.fields?.displayName?.value || "";
         if (regionName.startsWith(importedRegionNamePrefix)) {
           previousImportedRegions.push(region);
+          if (region.fields?.sample?.value?.entityId) {
+            removedImportedSampleIds.add(region.fields.sample.value.entityId);
+          }
+          if (region.fields?.playbackAutomationCollection?.value?.entityId) {
+            removedImportedPlaybackCollectionIds.add(
+              region.fields.playbackAutomationCollection.value.entityId,
+            );
+          }
           t.remove(region);
         }
       }
@@ -1315,61 +1303,101 @@ async function placeSampleIntoProject({
       throw new Error("Sample name for document placement is empty.");
     }
 
-    const normalizedUploadStartTimeSeconds = Math.max(
-      0,
-      Math.floor(
-        Number.isFinite(sampleUploadStartTimeSeconds)
-          ? sampleUploadStartTimeSeconds
-          : Date.now() / 1000,
+    const sampleNameCandidates = new Set([
+      sampleNameForDocument,
+      uploadedSampleName,
+      strippedUploadedSampleName,
+    ]);
+    const allAudioRegionsAfterCleanup = t.entities.ofTypes("audioRegion").get();
+    const referencedSampleIds = new Set(
+      allAudioRegionsAfterCleanup.map(
+        (region) => region.fields.sample.value.entityId,
       ),
     );
-    appendConsoleLine(
-      "system",
-      `Sample entity uploadStartTime set to ${normalizedUploadStartTimeSeconds} (unix seconds).`,
+    const allSamplesNow = t.entities.ofTypes("sample").get();
+    const matchingSampleEntities = allSamplesNow.filter((entity) =>
+      sampleNameCandidates.has(entity.fields.sampleName.value),
+    );
+    const reusableReferencedSample = matchingSampleEntities.find((entity) =>
+      referencedSampleIds.has(entity.id),
     );
 
-    const sampleEntity = t.create("sample", {
-      sampleName: sampleNameForDocument,
-      uploadStartTime: BigInt(normalizedUploadStartTimeSeconds),
-    });
+    let sampleEntity;
+    if (reusableReferencedSample) {
+      sampleEntity = reusableReferencedSample;
+      appendConsoleLine(
+        "system",
+        `Reusing existing referenced sample entity ${sampleEntity.id} (${sampleEntity.fields.sampleName.value}).`,
+      );
+    } else {
+      let removedStaleSamples = 0;
+      for (const candidateEntity of matchingSampleEntities) {
+        if (referencedSampleIds.has(candidateEntity.id)) {
+          continue;
+        }
+        t.remove(candidateEntity);
+        removedStaleSamples += 1;
+      }
+      for (const removedSampleId of removedImportedSampleIds) {
+        if (referencedSampleIds.has(removedSampleId)) {
+          continue;
+        }
+        const removedEntity = t.entities.ofTypes("sample").getEntity(removedSampleId);
+        if (removedEntity) {
+          t.remove(removedEntity);
+          removedStaleSamples += 1;
+        }
+      }
+      if (removedStaleSamples > 0) {
+        appendConsoleLine(
+          "system",
+          `Removed ${removedStaleSamples} stale sample entity/candidates before inserting new region.`,
+        );
+      }
+
+      sampleEntity = t.create("sample", {
+        sampleName: sampleNameForDocument,
+        // Sample is already uploaded and conversion-ready before placement.
+        uploadStartTime: BigInt(0),
+      });
+    }
 
     const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
     const regionPositionTicks = Math.max(0, secondsToTicksAtBpm(positionSeconds, bpm));
     const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
 
     const playbackAutomationCollection = t.create("automationCollection", {});
-    const referencePlaybackValue = referencePlaybackEvents.length
-      ? referencePlaybackEvents[0].fields.value.value
-      : 0.5;
-    const playbackValue = Math.min(1, Math.max(0, referencePlaybackValue));
-    const referenceInterpolation = referencePlaybackEvents.length
-      ? referencePlaybackEvents[0].fields.interpolation.value
-      : 1;
-    const playbackInterpolation = [1, 2].includes(referenceInterpolation)
-      ? referenceInterpolation
-      : 1;
-    appendConsoleLine(
-      "system",
-      `Playback automation seeded from ${referencePlaybackEvents.length ? "track reference" : "default"} value=${playbackValue.toFixed(3)} interpolation=${playbackInterpolation}.`,
-    );
-
-    // Seed a stable playback curve for imported regions.
-    const usedPositions = new Set();
-    const addPlaybackEvent = (positionTicks, value) => {
-      const safePosition =
-        usedPositions.has(positionTicks) && positionTicks >= regionDurationTicks
-          ? positionTicks + 1
-          : positionTicks;
-      usedPositions.add(safePosition);
+    if (referencePlaybackEvents.length) {
+      const referencePlaybackValue = referencePlaybackEvents[0].fields.value.value;
+      const playbackValue = Math.min(1, Math.max(0, referencePlaybackValue));
+      const referenceInterpolation = referencePlaybackEvents[0].fields.interpolation.value;
+      const playbackInterpolation = [1, 2].includes(referenceInterpolation)
+        ? referenceInterpolation
+        : 1;
+      appendConsoleLine(
+        "system",
+        `Playback automation seeded from track reference value=${playbackValue.toFixed(3)} interpolation=${playbackInterpolation}.`,
+      );
       t.create("automationEvent", {
         collection: playbackAutomationCollection.location,
-        positionTicks: safePosition,
-        value,
+        positionTicks: 0,
+        value: playbackValue,
         interpolation: playbackInterpolation,
       });
-    };
-    addPlaybackEvent(0, playbackValue);
-    addPlaybackEvent(regionDurationTicks, playbackValue);
+      t.create("automationEvent", {
+        collection: playbackAutomationCollection.location,
+        positionTicks: regionDurationTicks,
+        value: playbackValue,
+        interpolation: playbackInterpolation,
+      });
+      playbackSource = "track-reference-automation";
+    } else {
+      appendConsoleLine(
+        "system",
+        "Playback automation collection created with no seeded events (using DAW defaults).",
+      );
+      playbackSource = "default-empty-automation";
+    }
 
     t.create("audioRegion", {
       track: track.location,
@@ -1401,6 +1429,42 @@ async function placeSampleIntoProject({
       trackSelectionReason = `${trackSelectionReason}+forced-device-active`;
     }
     playbackSource = `${playbackSource},track=${trackSelectionReason}`;
+
+    if (replacePreviousImports && removedImportedPlaybackCollectionIds.size) {
+      const remainingRegions = t.entities.ofTypes("audioRegion").get();
+      const usedCollections = new Set(
+        remainingRegions.map(
+          (region) => region.fields.playbackAutomationCollection.value.entityId,
+        ),
+      );
+      const allAutomationEvents = t.entities.ofTypes("automationEvent").get();
+      let removedCollections = 0;
+      let removedEvents = 0;
+      for (const collectionId of removedImportedPlaybackCollectionIds) {
+        if (usedCollections.has(collectionId)) {
+          continue;
+        }
+        for (const event of allAutomationEvents) {
+          if (event.fields.collection.value.entityId === collectionId) {
+            t.remove(event);
+            removedEvents += 1;
+          }
+        }
+        const collectionEntity = t
+          .entities.ofTypes("automationCollection")
+          .getEntity(collectionId);
+        if (collectionEntity) {
+          t.remove(collectionEntity);
+          removedCollections += 1;
+        }
+      }
+      if (removedCollections || removedEvents) {
+        appendConsoleLine(
+          "system",
+          `Removed ${removedEvents} stale automation events and ${removedCollections} stale playback collections.`,
+        );
+      }
+    }
   });
 
   appendConsoleLine(
@@ -1584,15 +1648,11 @@ async function placeChosenSampleAtMarker() {
     lastUploadedSampleDurationSeconds ||
     selectedAudioBuffer?.duration ||
     8;
-  const sampleUploadStartTimeSeconds =
-    protobufTimestampToUnixSeconds(resolved.sample?.createTime) ||
-    Math.floor(Date.now() / 1000);
 
   await sleep(700);
   setVideoStatus("Placing selected sample region into project timeline...", "warn");
   await placeSampleIntoProjectWithRetry({
     sampleName: documentSampleName,
-    sampleUploadStartTimeSeconds,
     regionDisplayName: buildImportedRegionDisplayName(
       selectedVideoFile?.name || displayNameForUi,
     ),
