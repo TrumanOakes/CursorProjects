@@ -10,22 +10,25 @@
     <div class="layout">
       <header class="toolbar">
         <div class="title">
+          <p class="eyebrow">Audiotool Utility</p>
           <h1>Video Audio Importer for Audiotool</h1>
           <p>
-            Import a local video's decoded audio directly into a connected
-            Audiotool project timeline at an exact marker position.
+            Import decoded audio from a local video into your connected Audiotool
+            project timeline with precise marker placement.
           </p>
         </div>
         <section class="control-card">
           <h2>Audiotool connection</h2>
-          <p class="subtle">
-            Client ID:
-            <code>7c3188d7-220f-4d34-92a6-608acc8ed4eb</code>
-          </p>
-          <p class="subtle">
-            Redirect URL:
-            <code id="redirect-url"></code>
-          </p>
+          <div class="metadata-grid">
+            <p class="subtle meta-label">Client ID</p>
+            <p class="subtle">
+              <code>7c3188d7-220f-4d34-92a6-608acc8ed4eb</code>
+            </p>
+            <p class="subtle meta-label">Redirect URL</p>
+            <p class="subtle">
+              <code id="redirect-url"></code>
+            </p>
+          </div>
 
           <label for="project-input">Project URL or UUID</label>
           <input
@@ -35,24 +38,34 @@
             placeholder="https://beta.audiotool.com/studio?project=<project-id>"
           />
           <div class="buttons">
-            <button id="auth-btn" type="button">Login</button>
-            <button id="connect-btn" type="button" disabled>
+            <button id="auth-btn" class="btn-neutral" type="button">Login</button>
+            <button id="connect-btn" class="btn-primary" type="button" disabled>
               Connect Project
             </button>
-            <button id="disconnect-btn" type="button" disabled>Disconnect</button>
-            <button id="open-project-btn" type="button" disabled>
+            <button id="disconnect-btn" class="btn-danger" type="button" disabled>
+              Disconnect
+            </button>
+            <button id="open-project-btn" class="btn-ghost" type="button" disabled>
               Open Project Tab
             </button>
           </div>
-          <p id="audiotool-status" class="status-line">Initializing authentication...</p>
+          <p id="audiotool-status" class="status-line">
+            Initializing authentication...
+          </p>
         </section>
       </header>
 
       <main class="panes">
         <section class="pane workflow-pane">
           <h2>Local video workflow</h2>
+          <ul class="workflow-steps">
+            <li><span>1</span>Select a local video file</li>
+            <li><span>2</span>Set playhead marker position</li>
+            <li><span>3</span>Upload and place sample</li>
+          </ul>
           <label for="video-file-input">Upload/select local video</label>
           <input id="video-file-input" type="file" accept="video/*" />
+
           <section class="control-card transport-panel">
             <h3 class="subheading">Transport sync panel</h3>
             <div class="transport-times">
@@ -86,25 +99,33 @@
               </button>
             </div>
           </section>
-          <div class="buttons preview-buttons">
-            <button id="import-audio-btn" type="button" disabled>
-              Upload Video Audio as Sample
-            </button>
-            <button id="place-sample-btn" type="button" disabled>
-              Place Sample on Timeline at Marker
-            </button>
-          </div>
-          <label for="sample-name-input">Sample name to place</label>
-          <input
-            id="sample-name-input"
-            name="sample-name-input"
-            type="text"
-            placeholder="<uuid> or samples/<uuid> (auto-filled after upload)"
-          />
-          <label class="inline-checkbox">
-            <input id="replace-imported-toggle" type="checkbox" checked />
-            Replace previously imported video audio regions
-          </label>
+
+          <section class="control-card sample-panel">
+            <h3 class="subheading">Sample actions</h3>
+            <div class="buttons preview-buttons">
+              <button id="import-audio-btn" class="btn-primary" type="button" disabled>
+                Upload Video Audio as Sample
+              </button>
+              <button id="place-sample-btn" class="btn-accent" type="button" disabled>
+                Place Sample on Timeline at Marker
+              </button>
+            </div>
+            <label for="sample-name-input">Sample name to place</label>
+            <input
+              id="sample-name-input"
+              name="sample-name-input"
+              type="text"
+              placeholder="Auto-filled from uploaded sample display name"
+            />
+            <p class="subtle">
+              You can keep the auto-filled value or enter a known sample name manually.
+            </p>
+            <label class="inline-checkbox">
+              <input id="replace-imported-toggle" type="checkbox" checked />
+              Replace previously imported video audio regions
+            </label>
+          </section>
+
           <video id="local-video-preview" controls playsinline></video>
           <p id="video-status" class="status-line" data-state="warn">
             No video selected yet.
@@ -119,7 +140,7 @@
             authenticate in a full tab, then click <strong>Reload Preview</strong>.
           </p>
           <div class="buttons preview-buttons">
-            <button id="reload-preview-btn" type="button" disabled>
+            <button id="reload-preview-btn" class="btn-ghost" type="button" disabled>
               Reload Preview
             </button>
           </div>
