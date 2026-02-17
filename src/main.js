@@ -454,6 +454,31 @@ function buildImportedRegionDisplayName(fileName) {
   return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
 }
 
+function chooseDocumentSampleName(uploadedSampleName, existingSampleNames) {
+  const prefixedCount = existingSampleNames.filter((name) =>
+    String(name).startsWith("samples/"),
+  ).length;
+  const unprefixedCount = existingSampleNames.filter(
+    (name) => name && !String(name).startsWith("samples/"),
+  ).length;
+
+  const uploaded = String(uploadedSampleName || "");
+  const stripped = uploaded.replace(/^samples\//, "");
+
+  // Some projects appear to use unprefixed sample names internally.
+  if (unprefixedCount > prefixedCount && stripped) {
+    return {
+      sampleNameForDocument: stripped,
+      reason: `existing samples favor unprefixed format (${unprefixedCount} vs ${prefixedCount})`,
+    };
+  }
+
+  return {
+    sampleNameForDocument: uploaded,
+    reason: `existing samples favor prefixed format (${prefixedCount} vs ${unprefixedCount})`,
+  };
+}
+
 function getRedirectUrl() {
   const url = new URL(window.location.href);
   url.search = "";
@@ -1005,6 +1030,19 @@ async function placeSampleIntoProject({
     const bpm = config ? config.fields.tempoBpm.value : 125;
 
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
+    const existingSampleNames = t
+      .entities.ofTypes("sample")
+      .get()
+      .map((sampleEntity) => sampleEntity.fields.sampleName.value)
+      .filter(Boolean);
+
+    const { sampleNameForDocument, reason: sampleNameChoiceReason } =
+      chooseDocumentSampleName(sampleName, existingSampleNames);
+    appendConsoleLine(
+      "system",
+      `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
+    );
+
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
     const enabledTracks = existingAudioTracks
@@ -1048,7 +1086,7 @@ async function placeSampleIntoProject({
     usedTrackId = track.id;
 
     const sampleEntity = t.create("sample", {
-      sampleName,
+      sampleName: sampleNameForDocument,
       uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
     });
 
