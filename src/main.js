@@ -57,6 +57,7 @@ let importMarkerSeconds = 0;
 let missingRequiredScopes = [];
 let lastUploadedSampleName = "";
 let lastUploadedSampleDurationSeconds = 0;
+let authInitializationError = "";
 
 let audiotoolQueue = Promise.resolve();
 
@@ -457,31 +458,6 @@ function sanitizeDisplayName(name) {
 
 function buildImportedRegionDisplayName(fileName) {
   return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
-}
-
-function chooseDocumentSampleName(uploadedSampleName, existingSampleNames) {
-  const prefixedCount = existingSampleNames.filter((name) =>
-    String(name).startsWith("samples/"),
-  ).length;
-  const unprefixedCount = existingSampleNames.filter(
-    (name) => name && !String(name).startsWith("samples/"),
-  ).length;
-
-  const uploaded = String(uploadedSampleName || "");
-  const stripped = uploaded.replace(/^samples\//, "");
-
-  // Some projects appear to use unprefixed sample names internally.
-  if (unprefixedCount > prefixedCount && stripped) {
-    return {
-      sampleNameForDocument: stripped,
-      reason: `existing samples favor unprefixed format (${unprefixedCount} vs ${prefixedCount})`,
-    };
-  }
-
-  return {
-    sampleNameForDocument: uploaded,
-    reason: `existing samples favor prefixed format (${prefixedCount} vs ${unprefixedCount})`,
-  };
 }
 
 function protobufDurationToSeconds(playDuration) {
@@ -1085,9 +1061,6 @@ async function placeSampleIntoProject({
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
     const sampleEntities = t.entities.ofTypes("sample").get();
     const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
-    const existingSampleNames = sampleEntities
-      .map((sampleEntity) => sampleEntity.fields.sampleName.value)
-      .filter(Boolean);
 
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
@@ -1161,30 +1134,17 @@ async function placeSampleIntoProject({
       ? sampleById.get(referenceRegionOnTrack.fields.sample.value.entityId)?.fields
           .sampleName.value || ""
       : "";
-    const uploadedSampleName = String(sampleName || "");
-    const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
-
-    let sampleNameForDocument = uploadedSampleName;
-    let sampleNameChoiceReason = "default uploaded sample name";
-
-    if (referenceSampleNameOnTrack) {
-      const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
-      sampleNameForDocument = referenceUsesPrefix
-        ? uploadedSampleName
-        : strippedUploadedSampleName;
-      sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
-    } else {
-      const fallbackChoice = chooseDocumentSampleName(
-        uploadedSampleName,
-        existingSampleNames,
-      );
-      sampleNameForDocument = fallbackChoice.sampleNameForDocument;
-      sampleNameChoiceReason = fallbackChoice.reason;
-    }
+    const sampleNameForDocument = String(sampleName || "").trim();
+    const sampleNameChoiceReason = referenceSampleNameOnTrack
+      ? `manual/selected sample naming (reference on track: ${referenceSampleNameOnTrack})`
+      : "manual/selected sample naming";
     appendConsoleLine(
       "system",
       `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
     );
+    if (!sampleNameForDocument) {
+      throw new Error("Sample name for document placement is empty.");
+    }
 
     const sampleEntity = t.create("sample", {
       sampleName: sampleNameForDocument,
@@ -1313,7 +1273,11 @@ async function uploadSelectedVideoAudioSample() {
     protobufDurationToSeconds(readySample?.playDuration) || selectedAudioBuffer.duration;
   lastUploadedSampleName = uploadResult.sampleName;
   lastUploadedSampleDurationSeconds = durationSeconds;
-  sampleNameInput.value = uploadResult.sampleName;
+  sampleNameInput.value = String(uploadResult.sampleName || "").replace(/^samples\//, "");
+  appendConsoleLine(
+    "system",
+    `Sample uploaded as ${uploadResult.sampleName}. Timeline placement default set to ${sampleNameInput.value}.`,
+  );
 
   return {
     ...uploadResult,
@@ -1367,6 +1331,11 @@ async function placeChosenSampleAtMarker() {
 
   setVideoStatus("Resolving selected sample before timeline placement...", "warn");
   const resolved = await resolveSampleForPlacement(rawSampleName);
+  const documentSampleName = rawSampleName.trim();
+  appendConsoleLine(
+    "system",
+    `Resolved sample API name ${resolved.sampleName}; placing with document sample name ${documentSampleName}.`,
+  );
   const durationSeconds =
     protobufDurationToSeconds(resolved.sample?.playDuration) ||
     lastUploadedSampleDurationSeconds ||
@@ -1376,7 +1345,7 @@ async function placeChosenSampleAtMarker() {
   await sleep(700);
   setVideoStatus("Placing selected sample region into project timeline...", "warn");
   await placeSampleIntoProjectWithRetry({
-    sampleName: resolved.sampleName,
+    sampleName: documentSampleName,
     regionDisplayName: buildImportedRegionDisplayName(
       selectedVideoFile?.name || rawSampleName,
     ),
@@ -1386,7 +1355,8 @@ async function placeChosenSampleAtMarker() {
   });
 
   return {
-    sampleName: resolved.sampleName,
+    sampleName: documentSampleName,
+    resolvedApiSampleName: resolved.sampleName,
     importPositionSeconds,
     durationSeconds,
     replacePreviousImports,
@@ -1413,7 +1383,21 @@ projectInput.addEventListener("input", () => {
 
 authButton.addEventListener("click", async () => {
   if (!loginStatus) {
-    setAudiotoolStatus("Auth status not ready yet, try again.", "warn");
+    setAudiotoolStatus(
+      authInitializationError
+        ? `Auth not initialized: ${authInitializationError}`
+        : "Auth status not ready yet. Reinitializing auth...",
+      "warn",
+    );
+    await initializeAudiotoolAuth();
+    if (!loginStatus) {
+      setAudiotoolStatus(
+        authInitializationError
+          ? `Auth still not initialized: ${authInitializationError}`
+          : "Auth initialization did not complete. Check redirect URL/app settings.",
+        "error",
+      );
+    }
     return;
   }
 
@@ -1677,6 +1661,12 @@ placeSampleButton.addEventListener("click", () => {
       const message =
         `Successfully ${modeText} sample ${result.sampleName} at ${formatTimestamp(result.importPositionSeconds)} ` +
         `for ${formatDuration(result.durationSeconds)} duration.`;
+      if (result.resolvedApiSampleName && result.resolvedApiSampleName !== result.sampleName) {
+        appendConsoleLine(
+          "system",
+          `Placement used document sample name ${result.sampleName} (resolved API sample ${result.resolvedApiSampleName}).`,
+        );
+      }
       setVideoStatus(message, "ok");
       setAudiotoolStatus(
         "Sample region placed on project timeline. Open project tab to verify waveform.",
@@ -1696,6 +1686,7 @@ placeSampleButton.addEventListener("click", () => {
 });
 
 async function initializeAudiotoolAuth() {
+  authInitializationError = "";
   isInitializingAuth = true;
   updateControls();
   setAudiotoolStatus("Initializing Audiotool authentication...", "warn");
@@ -1712,6 +1703,7 @@ async function initializeAudiotoolAuth() {
     });
 
     if (loginStatus.loggedIn) {
+      authInitializationError = "";
       const userName = await loginStatus.getUserName();
       setAudiotoolStatus(
         `Logged in as ${toDisplayString(userName)}. Connect a project to start importing.`,
@@ -1736,6 +1728,7 @@ async function initializeAudiotoolAuth() {
     } else {
       const errorText = loginStatus.error ? toDisplayString(loginStatus.error) : "";
       if (errorText) {
+        authInitializationError = errorText;
         setAudiotoolStatus(`Logged out: ${errorText}`, "error");
       } else {
         setAudiotoolStatus("Logged out. Click Login to authorize this app.", "warn");
@@ -1743,8 +1736,10 @@ async function initializeAudiotoolAuth() {
     }
   } catch (error) {
     const detail = toDisplayString(error);
+    authInitializationError = detail;
     setAudiotoolStatus(`Auth setup failed: ${detail}`, "error");
     appendConsoleLine("error", detail);
+    loginStatus = null;
   } finally {
     isInitializingAuth = false;
     updateControls();

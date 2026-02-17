@@ -67,6 +67,11 @@ after updating scopes so the new token includes sample permissions.
 5. Click **Upload Video Audio as Sample**.
 6. Click **Place Sample on Timeline at Marker** (uses the uploaded sample).
 
+The sample-name input accepts either:
+
+- `<uuid>`
+- `samples/<uuid>`
+
 Import pipeline:
 
 - decode local video audio in-browser,
