@@ -16,6 +16,31 @@ Open:
 
 `http://127.0.0.1:5173/`
 
+## Deploy to GitHub Pages
+
+This repo includes a Pages workflow at:
+
+`.github/workflows/deploy-pages.yml`
+
+### One-time GitHub setup
+
+1. Go to **Settings -> Pages** for the repository.
+2. Set **Source** to **GitHub Actions**.
+3. Push to `main` (or run the workflow manually from Actions tab).
+
+### OAuth redirect setup for deployed site
+
+For a project page deployment, your app URL is:
+
+`https://<github-user>.github.io/<repo-name>/`
+
+Add that exact URL (including trailing slash) as an additional redirect URI in
+your Audiotool app settings.
+
+Keep local dev redirect too:
+
+`http://127.0.0.1:5173/`
+
 ## Audiotool app setup
 
 Configured client ID:
