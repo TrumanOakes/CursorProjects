@@ -464,31 +464,6 @@ function buildImportedRegionDisplayName(fileName) {
   return `${importedRegionNamePrefix} ${sanitizeDisplayName(fileName)}`.slice(0, 90);
 }
 
-function chooseDocumentSampleName(uploadedSampleName, existingSampleNames) {
-  const prefixedCount = existingSampleNames.filter((name) =>
-    String(name).startsWith("samples/"),
-  ).length;
-  const unprefixedCount = existingSampleNames.filter(
-    (name) => name && !String(name).startsWith("samples/"),
-  ).length;
-
-  const uploaded = String(uploadedSampleName || "");
-  const stripped = uploaded.replace(/^samples\//, "");
-
-  // Some projects appear to use unprefixed sample names internally.
-  if (unprefixedCount > prefixedCount && stripped) {
-    return {
-      sampleNameForDocument: stripped,
-      reason: `existing samples favor unprefixed format (${unprefixedCount} vs ${prefixedCount})`,
-    };
-  }
-
-  return {
-    sampleNameForDocument: uploaded,
-    reason: `existing samples favor prefixed format (${prefixedCount} vs ${unprefixedCount})`,
-  };
-}
-
 function protobufDurationToSeconds(playDuration) {
   if (!playDuration) {
     return 0;
@@ -1208,9 +1183,6 @@ async function placeSampleIntoProject({
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
     const sampleEntities = t.entities.ofTypes("sample").get();
     const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
-    const existingSampleNames = sampleEntities
-      .map((sampleEntity) => sampleEntity.fields.sampleName.value)
-      .filter(Boolean);
 
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
@@ -1288,7 +1260,7 @@ async function placeSampleIntoProject({
     const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
 
     let sampleNameForDocument = uploadedSampleName;
-    let sampleNameChoiceReason = "default uploaded sample name";
+    let sampleNameChoiceReason = "resolved sample API naming";
 
     if (referenceSampleNameOnTrack) {
       const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
@@ -1296,13 +1268,6 @@ async function placeSampleIntoProject({
         ? uploadedSampleName
         : strippedUploadedSampleName;
       sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
-    } else {
-      const fallbackChoice = chooseDocumentSampleName(
-        uploadedSampleName,
-        existingSampleNames,
-      );
-      sampleNameForDocument = fallbackChoice.sampleNameForDocument;
-      sampleNameChoiceReason = fallbackChoice.reason;
     }
     appendConsoleLine(
       "system",
@@ -1314,7 +1279,8 @@ async function placeSampleIntoProject({
 
     const sampleEntity = t.create("sample", {
       sampleName: sampleNameForDocument,
-      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
+      // Sample is already resolved/ready before placement.
+      uploadStartTime: BigInt(0),
     });
 
     const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
@@ -1347,6 +1313,8 @@ async function placeSampleIntoProject({
       gain: 1,
       fadeInDurationTicks: safeFadeTicks,
       fadeOutDurationTicks: safeFadeTicks,
+      // 1 = pitch-shift mode (faster/slower playback, valid non-zero mode).
+      timestretchMode: 1,
       region: {
         positionTicks: regionPositionTicks,
         durationTicks: regionDurationTicks,
