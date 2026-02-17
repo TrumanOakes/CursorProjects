@@ -1030,18 +1030,11 @@ async function placeSampleIntoProject({
     const bpm = config ? config.fields.tempoBpm.value : 125;
 
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
-    const existingSampleNames = t
-      .entities.ofTypes("sample")
-      .get()
+    const sampleEntities = t.entities.ofTypes("sample").get();
+    const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
+    const existingSampleNames = sampleEntities
       .map((sampleEntity) => sampleEntity.fields.sampleName.value)
       .filter(Boolean);
-
-    const { sampleNameForDocument, reason: sampleNameChoiceReason } =
-      chooseDocumentSampleName(sampleName, existingSampleNames);
-    appendConsoleLine(
-      "system",
-      `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
-    );
 
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
@@ -1105,6 +1098,40 @@ async function placeSampleIntoProject({
         : enabledTracks[0]
           ? "first-enabled-audio-track"
           : "first-audio-track";
+
+    const referenceRegionOnTrack = nonImportedAudioRegions.find(
+      (region) =>
+        region.fields.track.value.entityId === track.id &&
+        sampleById.get(region.fields.sample.value.entityId),
+    );
+    const referenceSampleNameOnTrack = referenceRegionOnTrack
+      ? sampleById.get(referenceRegionOnTrack.fields.sample.value.entityId)?.fields
+          .sampleName.value || ""
+      : "";
+    const uploadedSampleName = String(sampleName || "");
+    const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
+
+    let sampleNameForDocument = uploadedSampleName;
+    let sampleNameChoiceReason = "default uploaded sample name";
+
+    if (referenceSampleNameOnTrack) {
+      const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
+      sampleNameForDocument = referenceUsesPrefix
+        ? uploadedSampleName
+        : strippedUploadedSampleName;
+      sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
+    } else {
+      const fallbackChoice = chooseDocumentSampleName(
+        uploadedSampleName,
+        existingSampleNames,
+      );
+      sampleNameForDocument = fallbackChoice.sampleNameForDocument;
+      sampleNameChoiceReason = fallbackChoice.reason;
+    }
+    appendConsoleLine(
+      "system",
+      `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
+    );
 
     const sampleEntity = t.create("sample", {
       sampleName: sampleNameForDocument,
