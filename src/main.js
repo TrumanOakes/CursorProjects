@@ -415,6 +415,28 @@ function audioBufferToWavBlob(audioBuffer) {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
+function estimateAudioPeak(audioBuffer) {
+  if (!audioBuffer || audioBuffer.length <= 0) {
+    return 0;
+  }
+
+  const sampleWindow = Math.min(audioBuffer.length, 200000);
+  const stride = Math.max(1, Math.floor(audioBuffer.length / sampleWindow));
+  let peak = 0;
+
+  for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+    const channel = audioBuffer.getChannelData(channelIndex);
+    for (let sampleIndex = 0; sampleIndex < channel.length; sampleIndex += stride) {
+      const abs = Math.abs(channel[sampleIndex]);
+      if (abs > peak) {
+        peak = abs;
+      }
+    }
+  }
+
+  return peak;
+}
+
 function secondsToTicksAtBpm(seconds, bpm) {
   const ticksPerBeat = 3840;
   return Math.round((seconds * bpm * ticksPerBeat) / 60);
@@ -875,7 +897,13 @@ function isSampleReady(sample) {
     return false;
   }
 
-  return Boolean(sample.wavUrl || sample.mp3Url || sample.flacUrl || sample.playDuration);
+  const hasUrl = (value) => typeof value === "string" && value.trim().length > 0;
+  return Boolean(
+    hasUrl(sample.wavUrl) ||
+      hasUrl(sample.mp3Url) ||
+      hasUrl(sample.flacUrl) ||
+      hasUrl(sample.previewMp3Url),
+  );
 }
 
 function isLikelyPermissionError(error) {
@@ -889,7 +917,7 @@ function isLikelyPermissionError(error) {
 }
 
 async function waitForSampleReady(sampleName, opts = {}) {
-  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 90000;
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 180000;
   const pollMs = Number.isFinite(opts.pollMs) ? opts.pollMs : 1500;
 
   const client = await ensureClient();
@@ -915,6 +943,10 @@ async function waitForSampleReady(sampleName, opts = {}) {
     }
 
     if (isSampleReady(sampleResult.sample)) {
+      appendConsoleLine(
+        "system",
+        `Sample URLs ready (wav/mp3/flac available): ${sampleName}`,
+      );
       return sampleResult.sample;
     }
 
@@ -953,10 +985,24 @@ async function placeSampleIntoProject({
 
   let usedTrackId = "";
   let createdTrack = false;
+  let playbackSource = "unknown";
 
   await activeDocument.modify((t) => {
+    const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
+    const playbackFromExistingRegion = existingAudioRegions.find(
+      (region) => region.fields?.playbackAutomationCollection?.value,
+    )?.fields?.playbackAutomationCollection?.value;
+    const tempoAutomationTrack = t.entities.ofTypes("tempoAutomationTrack").getOne();
+
+    let playbackAutomationLocation =
+      playbackFromExistingRegion || tempoAutomationTrack?.location || null;
+    if (playbackFromExistingRegion) {
+      playbackSource = "existing-audio-region";
+    } else if (tempoAutomationTrack?.location) {
+      playbackSource = "tempo-automation-track";
+    }
+
     if (replacePreviousImports) {
-      const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
       for (const region of existingAudioRegions) {
         const regionName = region.fields?.region?.fields?.displayName?.value || "";
         if (regionName.startsWith(importedRegionNamePrefix)) {
@@ -1004,9 +1050,14 @@ async function placeSampleIntoProject({
 
     const sampleEntity = t.create("sample", {
       sampleName,
-      uploadStartTime: 0n,
+      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
     });
-    const automationCollection = t.create("automationCollection", {});
+
+    if (!playbackAutomationLocation) {
+      const fallbackAutomationCollection = t.create("automationCollection", {});
+      playbackAutomationLocation = fallbackAutomationCollection.location;
+      playbackSource = "new-automation-collection";
+    }
 
     const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
     const regionPositionTicks = Math.max(0, secondsToTicksAtBpm(positionSeconds, bpm));
@@ -1014,7 +1065,7 @@ async function placeSampleIntoProject({
 
     t.create("audioRegion", {
       track: track.location,
-      playbackAutomationCollection: automationCollection.location,
+      playbackAutomationCollection: playbackAutomationLocation,
       sample: sampleEntity.location,
       gain: 1,
       fadeInDurationTicks: safeFadeTicks,
@@ -1030,7 +1081,7 @@ async function placeSampleIntoProject({
 
   appendConsoleLine(
     "system",
-    `Placed imported audio region on track ${usedTrackId || "(unknown)"}${createdTrack ? " (new track created)" : ""}.`,
+    `Placed imported audio region on track ${usedTrackId || "(unknown)"}${createdTrack ? " (new track created)" : ""}; playback source=${playbackSource}.`,
   );
 }
 
@@ -1294,14 +1345,21 @@ videoFileInput.addEventListener("change", () => {
       }
 
       selectedAudioBuffer = decodedAudio;
+      const peak = estimateAudioPeak(decodedAudio);
       setVideoStatus(
         `Ready: ${file.name} (${formatDuration(decodedAudio.duration)}), ${decodedAudio.numberOfChannels} channels @ ${decodedAudio.sampleRate}Hz.`,
         "ok",
       );
       appendConsoleLine(
         "system",
-        `Decoded local video audio: ${file.name}, duration ${decodedAudio.duration.toFixed(2)}s.`,
+        `Decoded local video audio: ${file.name}, duration ${decodedAudio.duration.toFixed(2)}s, peak ${peak.toFixed(4)}.`,
       );
+      if (peak < 0.0005) {
+        appendConsoleLine(
+          "warn",
+          "Decoded audio appears near-silent (very low peak). The source video may not contain audible track data.",
+        );
+      }
     } catch (error) {
       if (selectedVideoFile !== file) {
         return;
