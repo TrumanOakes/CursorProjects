@@ -1367,37 +1367,31 @@ async function placeSampleIntoProject({
     const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
 
     const playbackAutomationCollection = t.create("automationCollection", {});
-    if (referencePlaybackEvents.length) {
-      const referencePlaybackValue = referencePlaybackEvents[0].fields.value.value;
-      const playbackValue = Math.min(1, Math.max(0, referencePlaybackValue));
-      const referenceInterpolation = referencePlaybackEvents[0].fields.interpolation.value;
-      const playbackInterpolation = [1, 2].includes(referenceInterpolation)
-        ? referenceInterpolation
-        : 1;
-      appendConsoleLine(
-        "system",
-        `Playback automation seeded from track reference value=${playbackValue.toFixed(3)} interpolation=${playbackInterpolation}.`,
-      );
-      t.create("automationEvent", {
-        collection: playbackAutomationCollection.location,
-        positionTicks: 0,
-        value: playbackValue,
-        interpolation: playbackInterpolation,
-      });
-      t.create("automationEvent", {
-        collection: playbackAutomationCollection.location,
-        positionTicks: regionDurationTicks,
-        value: playbackValue,
-        interpolation: playbackInterpolation,
-      });
-      playbackSource = "track-reference-automation";
-    } else {
-      appendConsoleLine(
-        "system",
-        "Playback automation collection created with no seeded events (using DAW defaults).",
-      );
-      playbackSource = "default-empty-automation";
-    }
+    const referenceInterpolation = referencePlaybackEvents.length
+      ? referencePlaybackEvents[0].fields.interpolation.value
+      : 1;
+    const playbackInterpolation = [1, 2].includes(referenceInterpolation)
+      ? referenceInterpolation
+      : 1;
+    // Playback automation value is normalized sample position (0..1), so a ramp
+    // across the region is required for audible playback.
+    t.create("automationEvent", {
+      collection: playbackAutomationCollection.location,
+      positionTicks: 0,
+      value: 0,
+      interpolation: playbackInterpolation,
+    });
+    t.create("automationEvent", {
+      collection: playbackAutomationCollection.location,
+      positionTicks: regionDurationTicks,
+      value: 1,
+      interpolation: playbackInterpolation,
+    });
+    appendConsoleLine(
+      "system",
+      `Playback automation seeded with normalized ramp 0->1 over ${regionDurationTicks} ticks (interpolation=${playbackInterpolation}).`,
+    );
+    playbackSource = "normalized-ramp-automation";
 
     t.create("audioRegion", {
       track: track.location,
