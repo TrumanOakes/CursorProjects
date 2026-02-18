@@ -4,17 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Audio Importer</title>
-    <link rel="stylesheet" href="./src/style.css" />
+    <link rel="stylesheet" href="./src/style.css?v=20260218-2" />
   </head>
   <body>
     <div class="layout">
       <header class="toolbar">
         <div class="title">
           <p class="eyebrow">Audiotool Utility</p>
-          <h1>Video Audio Importer for Audiotool</h1>
+          <h1>Video Audio Importer</h1>
           <p>
             Import decoded audio from a local video into your connected Audiotool
-            project timeline with precise marker placement.
+            project timeline with precise marker placement and cleaner workflow controls.
           </p>
         </div>
         <section class="control-card">
@@ -49,6 +49,10 @@
               Open Project Tab
             </button>
           </div>
+          <p class="subtle project-tab-hint">
+            Project preview is removed from this interface. Use
+            <strong>Open Project Tab</strong> to verify the connected Studio project.
+          </p>
           <p id="audiotool-status" class="status-line">
             Initializing authentication...
           </p>
@@ -57,7 +61,11 @@
 
       <main class="panes">
         <section class="pane workflow-pane">
-          <h2>Local video workflow</h2>
+          <h2>Local video workspace</h2>
+          <p class="subtle workspace-subtle">
+            Select a video, set a marker with the transport controls, then upload and place
+            the sample on your connected project timeline.
+          </p>
           <ul class="workflow-steps">
             <li><span>1</span>Select a local video file</li>
             <li><span>2</span>Set playhead marker position</li>
@@ -126,30 +134,34 @@
             </label>
           </section>
 
-          <video id="local-video-preview" controls playsinline></video>
+          <div class="video-stage">
+            <video id="local-video-preview" controls playsinline></video>
+          </div>
           <p id="video-status" class="status-line" data-state="warn">
             No video selected yet.
           </p>
         </section>
-
-        <section class="pane preview-pane">
-          <h2>Connected project preview</h2>
-          <h3 class="subheading">Project context</h3>
-          <p class="subtle preview-hint">
-            If embedded login fails, use <strong>Open Project Tab</strong> to
-            authenticate in a full tab, then click <strong>Reload Preview</strong>.
-          </p>
-          <div class="buttons preview-buttons">
-            <button id="reload-preview-btn" class="btn-ghost" type="button" disabled>
-              Reload Preview
-            </button>
-          </div>
-          <iframe
-            id="project-preview"
-            title="Audiotool project preview"
-          ></iframe>
-        </section>
       </main>
+
+      <section class="preview-compat" aria-hidden="true" hidden style="display: none">
+        <button
+          id="reload-preview-btn"
+          class="btn-ghost"
+          type="button"
+          disabled
+          tabindex="-1"
+          hidden
+          style="display: none"
+        >
+          Reload Preview
+        </button>
+        <iframe
+          id="project-preview"
+          title="Audiotool project preview"
+          hidden
+          style="display: none"
+        ></iframe>
+      </section>
 
       <details class="console-section">
         <summary>Console</summary>
@@ -157,6 +169,6 @@
       </details>
     </div>
 
-    <script type="module" src="./src/main.js"></script>
+    <script type="module" src="./src/main.js?v=20260218-2"></script>
   </body>
 </html>
