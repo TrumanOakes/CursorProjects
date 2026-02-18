@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Audio Importer</title>
-    <link rel="stylesheet" href="./src/style.css" />
+    <link rel="stylesheet" href="./src/style.css?v=20260218-2" />
   </head>
   <body>
     <div class="layout">
@@ -143,11 +143,24 @@
         </section>
       </main>
 
-      <section class="preview-compat" aria-hidden="true">
-        <button id="reload-preview-btn" class="btn-ghost" type="button" disabled tabindex="-1">
+      <section class="preview-compat" aria-hidden="true" hidden style="display: none">
+        <button
+          id="reload-preview-btn"
+          class="btn-ghost"
+          type="button"
+          disabled
+          tabindex="-1"
+          hidden
+          style="display: none"
+        >
           Reload Preview
         </button>
-        <div id="project-preview"></div>
+        <iframe
+          id="project-preview"
+          title="Audiotool project preview"
+          hidden
+          style="display: none"
+        ></iframe>
       </section>
 
       <details class="console-section">
@@ -156,6 +169,6 @@
       </details>
     </div>
 
-    <script type="module" src="./src/main.js"></script>
+    <script type="module" src="./src/main.js?v=20260218-2"></script>
   </body>
 </html>

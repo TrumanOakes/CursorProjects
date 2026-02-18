@@ -376,8 +376,8 @@ input::placeholder {
 
 #local-video-preview {
   width: 100%;
-  min-height: 430px;
-  height: min(70vh, 780px);
+  min-height: 500px;
+  height: min(74vh, 860px);
   border-radius: 11px;
   border: 1px solid var(--line-soft);
   background: #060c1b;
