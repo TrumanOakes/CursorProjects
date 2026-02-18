@@ -652,10 +652,6 @@ function resolveProjectConnection(projectValue) {
 }
 
 function setProjectPreview(studioUrl, note = "") {
-  if (!projectPreview) {
-    return;
-  }
-
   if (!canEmbedAudiotoolStudio) {
     projectPreview.src = "about:blank";
     projectPreview.srcdoc = `<!doctype html>
@@ -756,9 +752,7 @@ function updateControls() {
   connectButton.disabled = !loggedIn || isConnectingProject;
   disconnectButton.disabled = !activeDocument || isConnectingProject;
   openProjectButton.disabled = !activeProjectStudioUrl;
-  if (reloadPreviewButton) {
-    reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
-  }
+  reloadPreviewButton.disabled = !activeProjectStudioUrl || !canEmbedAudiotoolStudio;
   importAudioButton.disabled = !canUploadSample;
   placeSampleButton.disabled = !canPlaceSample;
 
@@ -866,13 +860,13 @@ async function connectProject(project) {
     appendConsoleLine("system", `Connected Audiotool project: ${projectReference}`);
     appendConsoleLine(
       "system",
-      "Project connected. Use Open Project Tab to continue in Studio.",
+      "Project preview updated. If frame login is blocked, continue in Open Project Tab.",
     );
 
     if (!canEmbedAudiotoolStudio) {
       appendConsoleLine(
         "system",
-        "Embedded Studio is unavailable on local/non-audiotool hosts; Open Project Tab is the supported workflow.",
+        "Embedded preview is disabled on local/non-audiotool hosts. Open Project Tab is the supported local workflow.",
       );
     }
 
@@ -1828,22 +1822,20 @@ openProjectButton.addEventListener("click", () => {
   window.open(activeProjectStudioUrl, "_blank");
 });
 
-if (reloadPreviewButton) {
-  reloadPreviewButton.addEventListener("click", () => {
-    if (!activeProjectStudioUrl) {
-      return;
-    }
+reloadPreviewButton.addEventListener("click", () => {
+  if (!activeProjectStudioUrl) {
+    return;
+  }
 
-    setProjectPreview(
-      activeProjectStudioUrl,
-      "Project preview could not be loaded in this frame. Open it in a new tab.",
-    );
-    appendConsoleLine(
-      "system",
-      "Preview reloaded. If login still fails in iframe, continue in Open Project Tab.",
-    );
-  });
-}
+  setProjectPreview(
+    activeProjectStudioUrl,
+    "Project preview could not be loaded in this frame. Open it in a new tab.",
+  );
+  appendConsoleLine(
+    "system",
+    "Preview reloaded. If login still fails in iframe, continue in Open Project Tab.",
+  );
+});
 
 videoPlayPauseButton.addEventListener("click", () => {
   if (!selectedVideoFile) {
@@ -2122,7 +2114,7 @@ async function initializeAudiotoolAuth(force = false) {
         if (!canEmbedAudiotoolStudio) {
           appendConsoleLine(
             "system",
-            "Use Open Project Tab for Studio context while importing and placing audio.",
+            "Embedded preview is disabled on this host; use Open Project Tab for Studio.",
           );
         }
       } else {

@@ -11,10 +11,10 @@
       <header class="toolbar">
         <div class="title">
           <p class="eyebrow">Audiotool Utility</p>
-          <h1>Video Audio Importer</h1>
+          <h1>Video Audio Importer for Audiotool</h1>
           <p>
-            Import decoded audio from local video directly into your connected
-            Audiotool project timeline with precise marker placement.
+            Import decoded audio from a local video into your connected Audiotool
+            project timeline with precise marker placement.
           </p>
         </div>
         <section class="control-card">
@@ -49,10 +49,6 @@
               Open Project Tab
             </button>
           </div>
-          <p class="subtle project-tab-hint">
-            Embedded project preview is disabled for now. Use
-            <strong>Open Project Tab</strong> for Studio verification.
-          </p>
           <p id="audiotool-status" class="status-line">
             Initializing authentication...
           </p>
@@ -61,13 +57,7 @@
 
       <main class="panes">
         <section class="pane workflow-pane">
-          <div class="pane-header">
-            <h2>Local video workspace</h2>
-            <p class="subtle">
-              Select a local video, set your marker, then upload and place the
-              decoded sample into the connected project.
-            </p>
-          </div>
+          <h2>Local video workflow</h2>
           <ul class="workflow-steps">
             <li><span>1</span>Select a local video file</li>
             <li><span>2</span>Set playhead marker position</li>
@@ -136,12 +126,28 @@
             </label>
           </section>
 
-          <div class="video-stage">
-            <video id="local-video-preview" controls playsinline></video>
-          </div>
+          <video id="local-video-preview" controls playsinline></video>
           <p id="video-status" class="status-line" data-state="warn">
             No video selected yet.
           </p>
+        </section>
+
+        <section class="pane preview-pane">
+          <h2>Connected project preview</h2>
+          <h3 class="subheading">Project context</h3>
+          <p class="subtle preview-hint">
+            If embedded login fails, use <strong>Open Project Tab</strong> to
+            authenticate in a full tab, then click <strong>Reload Preview</strong>.
+          </p>
+          <div class="buttons preview-buttons">
+            <button id="reload-preview-btn" class="btn-ghost" type="button" disabled>
+              Reload Preview
+            </button>
+          </div>
+          <iframe
+            id="project-preview"
+            title="Audiotool project preview"
+          ></iframe>
         </section>
       </main>
 
