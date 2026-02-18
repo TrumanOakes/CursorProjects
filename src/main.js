@@ -1484,7 +1484,9 @@ async function placeSampleIntoProject({
           collection: playbackAutomationCollection.location,
           positionTicks: mappedTicks,
           value: Math.min(1, Math.max(0, event.value)),
-          interpolation: [1, 2].includes(event.interpolation) ? event.interpolation : 1,
+          // For playback position curves, stepped interpolation can freeze playback.
+          interpolation: 2,
+          slope: 0,
         });
       }
     } else {
@@ -1492,13 +1494,15 @@ async function placeSampleIntoProject({
         collection: playbackAutomationCollection.location,
         positionTicks: 0,
         value: 0,
-        interpolation: 1,
+        interpolation: 2,
+        slope: 0,
       });
       t.create("automationEvent", {
         collection: playbackAutomationCollection.location,
         positionTicks: computedDurationTicks,
         value: 1,
-        interpolation: 1,
+        interpolation: 2,
+        slope: 0,
       });
     }
 
