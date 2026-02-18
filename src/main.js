@@ -1159,14 +1159,9 @@ async function placeSampleIntoProject({
     throw new Error("No connected project document available.");
   }
 
-  let usedTrackId = "";
-  let createdTrack = false;
-  let playbackSource = "seeded-automation-collection";
-
-  await activeDocument.modify((t) => {
+  const prepared = await activeDocument.modify((t) => {
     const existingAudioRegions = t.entities.ofTypes("audioRegion").get();
     const previousImportedRegions = [];
-    const removedImportedSampleIds = new Set();
     const removedImportedPlaybackCollectionIds = new Set();
 
     if (replacePreviousImports) {
@@ -1174,33 +1169,27 @@ async function placeSampleIntoProject({
         const regionName = region.fields?.region?.fields?.displayName?.value || "";
         if (regionName.startsWith(importedRegionNamePrefix)) {
           previousImportedRegions.push(region);
-          if (region.fields?.sample?.value?.entityId) {
-            removedImportedSampleIds.add(region.fields.sample.value.entityId);
-          }
-          if (region.fields?.playbackAutomationCollection?.value?.entityId) {
-            removedImportedPlaybackCollectionIds.add(
-              region.fields.playbackAutomationCollection.value.entityId,
-            );
+          const playbackCollectionId = region.fields?.playbackAutomationCollection?.value
+            ?.entityId;
+          if (playbackCollectionId) {
+            removedImportedPlaybackCollectionIds.add(playbackCollectionId);
           }
           t.remove(region);
         }
       }
     }
 
-    const config = t.entities.ofTypes("config").getOne();
-    const bpm = config ? config.fields.tempoBpm.value : 125;
-
     const existingAudioTracks = t.entities.ofTypes("audioTrack").get();
     const sampleEntities = t.entities.ofTypes("sample").get();
     const sampleById = new Map(sampleEntities.map((entity) => [entity.id, entity]));
-
     const trackSortByOrder = (a, b) =>
       a.fields.orderAmongTracks.value - b.fields.orderAmongTracks.value;
     const enabledTracks = existingAudioTracks
       .filter((currentTrack) => currentTrack.fields.isEnabled.value)
       .sort(trackSortByOrder);
 
-    const nonImportedAudioRegions = existingAudioRegions.filter(
+    const remainingAudioRegions = t.entities.ofTypes("audioRegion").get();
+    const nonImportedAudioRegions = remainingAudioRegions.filter(
       (region) =>
         !(region.fields?.region?.fields?.displayName?.value || "").startsWith(
           importedRegionNamePrefix,
@@ -1227,6 +1216,7 @@ async function placeSampleIntoProject({
       enabledTracks[0] ||
       [...existingAudioTracks].sort(trackSortByOrder)[0] ||
       undefined;
+    let createdTrack = false;
     if (!track) {
       const device = t.entities.ofTypes("audioDevice").getOne();
       if (!device) {
@@ -1248,7 +1238,6 @@ async function placeSampleIntoProject({
       createdTrack = true;
     }
 
-    usedTrackId = track.id;
     let trackSelectionReason = enabledPreferredTracks[0]
       ? "enabled-track-with-existing-audio"
       : previousImportedTrack
@@ -1256,6 +1245,19 @@ async function placeSampleIntoProject({
         : enabledTracks[0]
           ? "first-enabled-audio-track"
           : "first-audio-track";
+
+    if (!track.fields.isEnabled.value) {
+      t.update(track.fields.isEnabled, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-track-enabled`;
+    }
+    const trackPlayer = track.fields.player.value;
+    const audioDevice = trackPlayer?.entityId
+      ? t.entities.ofTypes("audioDevice").getEntity(trackPlayer.entityId)
+      : undefined;
+    if (audioDevice && !audioDevice.fields.isActive.value) {
+      t.update(audioDevice.fields.isActive, true);
+      trackSelectionReason = `${trackSelectionReason}+forced-device-active`;
+    }
 
     const referenceRegionOnTrack = nonImportedAudioRegions.find(
       (region) =>
@@ -1281,159 +1283,33 @@ async function placeSampleIntoProject({
           .sort(
             (a, b) => a.fields.positionTicks.value - b.fields.positionTicks.value,
           )
+          .map((event) => ({
+            positionTicks: event.fields.positionTicks.value,
+            value: event.fields.value.value,
+            interpolation: event.fields.interpolation.value,
+          }))
       : [];
-    const uploadedSampleName = String(sampleName || "");
-    const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
-
-    let sampleNameForDocument = uploadedSampleName;
-    let sampleNameChoiceReason = "resolved sample API naming";
-
-    if (referenceSampleNameOnTrack) {
-      const referenceUsesPrefix = referenceSampleNameOnTrack.startsWith("samples/");
-      sampleNameForDocument = referenceUsesPrefix
-        ? uploadedSampleName
-        : strippedUploadedSampleName;
-      sampleNameChoiceReason = `matched target track reference sample format (${referenceSampleNameOnTrack})`;
-    }
-    appendConsoleLine(
-      "system",
-      `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
-    );
-    if (!sampleNameForDocument) {
-      throw new Error("Sample name for document placement is empty.");
-    }
-
-    const sampleNameCandidates = new Set([
-      sampleNameForDocument,
-      uploadedSampleName,
-      strippedUploadedSampleName,
-    ]);
-    const allAudioRegionsAfterCleanup = t.entities.ofTypes("audioRegion").get();
-    const referencedSampleIds = new Set(
-      allAudioRegionsAfterCleanup.map(
-        (region) => region.fields.sample.value.entityId,
-      ),
-    );
-    const allSamplesNow = t.entities.ofTypes("sample").get();
-    const matchingSampleEntities = allSamplesNow.filter((entity) =>
-      sampleNameCandidates.has(entity.fields.sampleName.value),
-    );
-    const reusableReferencedSample = matchingSampleEntities.find((entity) =>
-      referencedSampleIds.has(entity.id),
-    );
-
-    let sampleEntity;
-    if (reusableReferencedSample) {
-      sampleEntity = reusableReferencedSample;
-      appendConsoleLine(
-        "system",
-        `Reusing existing referenced sample entity ${sampleEntity.id} (${sampleEntity.fields.sampleName.value}).`,
-      );
-    } else {
-      let removedStaleSamples = 0;
-      for (const candidateEntity of matchingSampleEntities) {
-        if (referencedSampleIds.has(candidateEntity.id)) {
-          continue;
-        }
-        t.remove(candidateEntity);
-        removedStaleSamples += 1;
-      }
-      for (const removedSampleId of removedImportedSampleIds) {
-        if (referencedSampleIds.has(removedSampleId)) {
-          continue;
-        }
-        const removedEntity = t.entities.ofTypes("sample").getEntity(removedSampleId);
-        if (removedEntity) {
-          t.remove(removedEntity);
-          removedStaleSamples += 1;
-        }
-      }
-      if (removedStaleSamples > 0) {
-        appendConsoleLine(
-          "system",
-          `Removed ${removedStaleSamples} stale sample entity/candidates before inserting new region.`,
-        );
-      }
-
-      sampleEntity = t.create("sample", {
-        sampleName: sampleNameForDocument,
-        // Sample is already uploaded and conversion-ready before placement.
-        uploadStartTime: BigInt(0),
-      });
-    }
-
-    const regionDurationTicks = Math.max(1, secondsToTicksAtBpm(durationSeconds, bpm));
-    const regionPositionTicks = Math.max(0, secondsToTicksAtBpm(positionSeconds, bpm));
-    const safeFadeTicks = Math.min(10, Math.floor(regionDurationTicks / 2));
-
-    const playbackAutomationCollection = t.create("automationCollection", {});
-    const referenceInterpolation = referencePlaybackEvents.length
-      ? referencePlaybackEvents[0].fields.interpolation.value
+    const referenceTimestretchMode = referenceRegionOnTrack
+      ? referenceRegionOnTrack.fields.timestretchMode.value
+      : 2;
+    const referenceGain = referenceRegionOnTrack
+      ? referenceRegionOnTrack.fields.gain.value
       : 1;
-    const playbackInterpolation = [1, 2].includes(referenceInterpolation)
-      ? referenceInterpolation
-      : 1;
-    // Playback automation value is normalized sample position (0..1), so a ramp
-    // across the region is required for audible playback.
-    t.create("automationEvent", {
-      collection: playbackAutomationCollection.location,
-      positionTicks: 0,
-      value: 0,
-      interpolation: playbackInterpolation,
-    });
-    t.create("automationEvent", {
-      collection: playbackAutomationCollection.location,
-      positionTicks: regionDurationTicks,
-      value: 1,
-      interpolation: playbackInterpolation,
-    });
-    appendConsoleLine(
-      "system",
-      `Playback automation seeded with normalized ramp 0->1 over ${regionDurationTicks} ticks (interpolation=${playbackInterpolation}).`,
-    );
-    playbackSource = "normalized-ramp-automation";
-
-    t.create("audioRegion", {
-      track: track.location,
-      playbackAutomationCollection: playbackAutomationCollection.location,
-      sample: sampleEntity.location,
-      gain: 1,
-      fadeInDurationTicks: safeFadeTicks,
-      fadeOutDurationTicks: safeFadeTicks,
-      // 2 = time stretch mode (preserve pitch), DAW default.
-      timestretchMode: 2,
-      region: {
-        positionTicks: regionPositionTicks,
-        durationTicks: regionDurationTicks,
-        loopDurationTicks: regionDurationTicks,
-        displayName: regionDisplayName,
-      },
-    });
-
-    if (!track.fields.isEnabled.value) {
-      t.update(track.fields.isEnabled, true);
-      trackSelectionReason = `${trackSelectionReason}+forced-track-enabled`;
-    }
-    const trackPlayer = track.fields.player.value;
-    const audioDevice = trackPlayer?.entityId
-      ? t.entities.ofTypes("audioDevice").getEntity(trackPlayer.entityId)
-      : undefined;
-    if (audioDevice && !audioDevice.fields.isActive.value) {
-      t.update(audioDevice.fields.isActive, true);
-      trackSelectionReason = `${trackSelectionReason}+forced-device-active`;
-    }
-    playbackSource = `${playbackSource},track=${trackSelectionReason}`;
+    const referenceFadeInDurationTicks = referenceRegionOnTrack
+      ? referenceRegionOnTrack.fields.fadeInDurationTicks.value
+      : 10;
+    const referenceFadeOutDurationTicks = referenceRegionOnTrack
+      ? referenceRegionOnTrack.fields.fadeOutDurationTicks.value
+      : 10;
 
     if (replacePreviousImports && removedImportedPlaybackCollectionIds.size) {
-      const remainingRegions = t.entities.ofTypes("audioRegion").get();
       const usedCollections = new Set(
-        remainingRegions.map(
-          (region) => region.fields.playbackAutomationCollection.value.entityId,
-        ),
+        t.entities
+          .ofTypes("audioRegion")
+          .get()
+          .map((region) => region.fields.playbackAutomationCollection.value.entityId),
       );
       const allAutomationEvents = t.entities.ofTypes("automationEvent").get();
-      let removedCollections = 0;
-      let removedEvents = 0;
       for (const collectionId of removedImportedPlaybackCollectionIds) {
         if (usedCollections.has(collectionId)) {
           continue;
@@ -1441,7 +1317,6 @@ async function placeSampleIntoProject({
         for (const event of allAutomationEvents) {
           if (event.fields.collection.value.entityId === collectionId) {
             t.remove(event);
-            removedEvents += 1;
           }
         }
         const collectionEntity = t
@@ -1449,21 +1324,218 @@ async function placeSampleIntoProject({
           .getEntity(collectionId);
         if (collectionEntity) {
           t.remove(collectionEntity);
-          removedCollections += 1;
         }
       }
-      if (removedCollections || removedEvents) {
-        appendConsoleLine(
-          "system",
-          `Removed ${removedEvents} stale automation events and ${removedCollections} stale playback collections.`,
-        );
-      }
     }
+
+    return {
+      trackId: track.id,
+      createdTrack,
+      trackSelectionReason,
+      referenceSampleNameOnTrack,
+      referencePlaybackEvents,
+      referenceTimestretchMode,
+      referenceGain,
+      referenceFadeInDurationTicks,
+      referenceFadeOutDurationTicks,
+    };
   });
 
+  const uploadedSampleName = String(sampleName || "").trim();
+  const strippedUploadedSampleName = uploadedSampleName.replace(/^samples\//, "");
+  let sampleNameForDocument = uploadedSampleName;
+  let sampleNameChoiceReason = "resolved sample API naming";
+  if (prepared.referenceSampleNameOnTrack) {
+    const referenceUsesPrefix = prepared.referenceSampleNameOnTrack.startsWith("samples/");
+    sampleNameForDocument = referenceUsesPrefix
+      ? uploadedSampleName
+      : strippedUploadedSampleName;
+    sampleNameChoiceReason =
+      `matched target track reference sample format (${prepared.referenceSampleNameOnTrack})`;
+  }
   appendConsoleLine(
     "system",
-    `Placed imported audio region on track ${usedTrackId || "(unknown)"}${createdTrack ? " (new track created)" : ""}; playback source=${playbackSource}.`,
+    `Sample entity naming: using "${sampleNameForDocument}" because ${sampleNameChoiceReason}.`,
+  );
+  if (!sampleNameForDocument) {
+    throw new Error("Sample name for document placement is empty.");
+  }
+
+  const ensuredSample = await activeDocument.modify((t) => {
+    const candidateNames = new Set(
+      [sampleNameForDocument, uploadedSampleName, strippedUploadedSampleName].filter(Boolean),
+    );
+    const referencedSampleIds = new Set(
+      t.entities
+        .ofTypes("audioRegion")
+        .get()
+        .map((region) => region.fields.sample.value.entityId),
+    );
+    const sampleEntities = t.entities.ofTypes("sample").get();
+    const matchingEntities = sampleEntities.filter((entity) =>
+      candidateNames.has(entity.fields.sampleName.value),
+    );
+    const reusable = matchingEntities.find((entity) => referencedSampleIds.has(entity.id));
+    if (reusable) {
+      return {
+        sampleEntityId: reusable.id,
+        reused: true,
+        removedStaleSamples: 0,
+      };
+    }
+
+    let removedStaleSamples = 0;
+    for (const entity of matchingEntities) {
+      if (referencedSampleIds.has(entity.id)) {
+        continue;
+      }
+      t.remove(entity);
+      removedStaleSamples += 1;
+    }
+
+    const created = t.create("sample", {
+      sampleName: sampleNameForDocument,
+      uploadStartTime: BigInt(Math.floor(Date.now() / 1000)),
+    });
+    return {
+      sampleEntityId: created.id,
+      reused: false,
+      removedStaleSamples,
+    };
+  });
+
+  if (ensuredSample.removedStaleSamples > 0) {
+    appendConsoleLine(
+      "system",
+      `Removed ${ensuredSample.removedStaleSamples} stale matching sample entities before placement.`,
+    );
+  }
+  appendConsoleLine(
+    "system",
+    ensuredSample.reused
+      ? `Reusing existing sample entity ${ensuredSample.sampleEntityId}.`
+      : `Created sample entity ${ensuredSample.sampleEntityId} for placement.`,
+  );
+
+  const playbackResult = await activeDocument.modify((t) => {
+    const config = t.entities.ofTypes("config").getOne();
+    const bpm = config ? config.fields.tempoBpm.value : 125;
+    const computedDurationTicks = Math.max(
+      1,
+      secondsToTicksAtBpm(durationSeconds, bpm),
+    );
+    const computedPositionTicks = Math.max(
+      0,
+      secondsToTicksAtBpm(positionSeconds, bpm),
+    );
+    const track = t.entities.ofTypes("audioTrack").getEntity(prepared.trackId);
+    if (!track) {
+      throw new Error(`Target track ${prepared.trackId} no longer exists.`);
+    }
+    const sampleEntity = t
+      .entities.ofTypes("sample")
+      .getEntity(ensuredSample.sampleEntityId);
+    if (!sampleEntity) {
+      throw new Error(`Sample entity ${ensuredSample.sampleEntityId} no longer exists.`);
+    }
+
+    const safeFadeTicks = Math.min(
+      Math.max(0, Math.floor(prepared.referenceFadeInDurationTicks || 10)),
+      Math.floor(computedDurationTicks / 2),
+    );
+    const safeFadeOutTicks = Math.min(
+      Math.max(0, Math.floor(prepared.referenceFadeOutDurationTicks || 10)),
+      Math.floor(computedDurationTicks / 2),
+    );
+    const safeTimestretchMode = [1, 2].includes(prepared.referenceTimestretchMode)
+      ? prepared.referenceTimestretchMode
+      : 2;
+    const safeGain =
+      Number.isFinite(prepared.referenceGain) && prepared.referenceGain > 0
+        ? prepared.referenceGain
+        : 1;
+
+    const playbackAutomationCollection = t.create("automationCollection", {});
+    const sourceEvents = Array.isArray(prepared.referencePlaybackEvents)
+      ? prepared.referencePlaybackEvents
+      : [];
+    if (sourceEvents.length >= 2) {
+      const sortedEvents = [...sourceEvents].sort(
+        (a, b) => a.positionTicks - b.positionTicks,
+      );
+      const firstPosition = sortedEvents[0].positionTicks;
+      const lastPosition = sortedEvents[sortedEvents.length - 1].positionTicks;
+      const sourceSpan = Math.max(1, lastPosition - firstPosition);
+      const usedPositions = new Set();
+      for (const event of sortedEvents) {
+        const normalized = (event.positionTicks - firstPosition) / sourceSpan;
+        let mappedTicks = Math.max(
+          0,
+          Math.min(
+            computedDurationTicks,
+            Math.round(normalized * computedDurationTicks),
+          ),
+        );
+        if (usedPositions.has(mappedTicks) && mappedTicks >= computedDurationTicks) {
+          mappedTicks += 1;
+        }
+        usedPositions.add(mappedTicks);
+        t.create("automationEvent", {
+          collection: playbackAutomationCollection.location,
+          positionTicks: mappedTicks,
+          value: Math.min(1, Math.max(0, event.value)),
+          interpolation: [1, 2].includes(event.interpolation) ? event.interpolation : 1,
+        });
+      }
+    } else {
+      t.create("automationEvent", {
+        collection: playbackAutomationCollection.location,
+        positionTicks: 0,
+        value: 0,
+        interpolation: 1,
+      });
+      t.create("automationEvent", {
+        collection: playbackAutomationCollection.location,
+        positionTicks: computedDurationTicks,
+        value: 1,
+        interpolation: 1,
+      });
+    }
+
+    t.create("audioRegion", {
+      track: track.location,
+      playbackAutomationCollection: playbackAutomationCollection.location,
+      sample: sampleEntity.location,
+      gain: safeGain,
+      fadeInDurationTicks: safeFadeTicks,
+      fadeOutDurationTicks: safeFadeOutTicks,
+      timestretchMode: safeTimestretchMode,
+      region: {
+        positionTicks: computedPositionTicks,
+        durationTicks: computedDurationTicks,
+        loopDurationTicks: computedDurationTicks,
+        displayName: regionDisplayName,
+      },
+    });
+
+    return {
+      bpm,
+      durationTicks: computedDurationTicks,
+      positionTicks: computedPositionTicks,
+      usedReferenceEvents: sourceEvents.length >= 2,
+    };
+  });
+
+  const playbackSource = playbackResult.usedReferenceEvents
+    ? "scaled-track-reference-automation"
+    : "normalized-ramp-automation";
+  appendConsoleLine(
+    "system",
+    `Playback automation source=${playbackSource}; bpm=${playbackResult.bpm}, durationTicks=${playbackResult.durationTicks}, positionTicks=${playbackResult.positionTicks}.`,
+  );
+  appendConsoleLine(
+    "system",
+    `Placed imported audio region on track ${prepared.trackId}${prepared.createdTrack ? " (new track created)" : ""}; track selection=${prepared.trackSelectionReason}.`,
   );
 }
 
